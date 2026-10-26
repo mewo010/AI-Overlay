@@ -131,8 +131,8 @@ class ConfigManager:
 
     DEFAULT_CONFIG = {
         "api_key_encrypted": "",
-        "model": "gemini-2.5-flash",
-        "live_model": "gemini-2.5-flash",
+        "model": "gemini-3.8-flash",
+        "live_model": "gemini-3.8-live",
         "hotkey_toggle": "Ctrl+Shift+Space",
         "hotkey_voice": "Ctrl+Shift+V",
         "start_with_windows": False,
@@ -205,6 +205,24 @@ class ConfigManager:
                     self.data.update(saved)
             except Exception as e:
                 print(f"[Config] Failed to load config, using defaults: {e}")
+
+        # Automatically migrate deprecated model names (e.g., gemini-2.5-flash) to active Gemini models
+        deprecated_models = {
+            "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite",
+            "gemini-2.0-flash", "gemini-2.0-pro", "gemini-1.5-flash", "gemini-1.5-pro",
+            "gemini-2.0-flash-exp"
+        }
+        migrated = False
+        if self.data.get("model") in deprecated_models or not self.data.get("model"):
+            self.data["model"] = "gemini-3.8-flash"
+            migrated = True
+
+        if self.data.get("live_model") in deprecated_models or not self.data.get("live_model"):
+            self.data["live_model"] = "gemini-3.8-live"
+            migrated = True
+
+        if migrated:
+            self.save()
 
     def save(self):
         """Persists current configuration to disk."""
@@ -512,9 +530,9 @@ class TTSWorker(QThread):
             self.started_speaking.emit()
             client = genai.Client(api_key=self.api_key)
 
-            # Query unary TTS
+            # Query unary TTS using official TTS model
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.8-flash-lite-tts",
                 contents=self.text,
                 config=types.GenerateContentConfig(
                     response_modalities=["AUDIO"],
@@ -580,7 +598,7 @@ class LiveAudioSessionWorker(QThread):
     def __init__(
         self,
         api_key: str,
-        live_model: str = "gemini-2.5-flash",
+        live_model: str = "gemini-3.8-live",
         voice_name: str = "Puck",
         input_device: Optional[int] = None,
         output_device: Optional[int] = None,
@@ -1417,15 +1435,24 @@ class GeminiOverlayWindow(QMainWindow):
         key_box.addWidget(self.btn_show_key)
         layout.addLayout(key_box)
 
-        # 2. Text/Vision Model Dropdown
+        # 2. Text/Vision Model Dropdown (Active Free API Tier Models)
         lbl_model = QLabel("Text & Vision Model:")
         layout.addWidget(lbl_model)
         self.cb_model = QComboBox()
-        self.cb_model.addItems(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"])
-        current_model = self.cfg.data.get("model", "gemini-2.5-flash")
+        # Active free API tier models
+        free_models = [
+            "gemini-3.8-flash",       # Free Tier Flagship (Text, Code, Vision)
+            "gemini-3.1-flash-lite",  # Free Tier Ultra-Fast (Low Latency)
+            "gemini-flash-latest",    # Free Tier (Tracks Latest Stable Flash)
+        ]
+        self.cb_model.addItems(free_models)
+        self.cb_model.setEditable(True)  # Allows entering any custom model identifier
+        current_model = self.cfg.data.get("model", "gemini-3.8-flash")
         idx = self.cb_model.findText(current_model)
         if idx >= 0:
             self.cb_model.setCurrentIndex(idx)
+        else:
+            self.cb_model.setEditText(current_model)
         layout.addWidget(self.cb_model)
 
         # 3. Hotkey configuration
@@ -1647,7 +1674,7 @@ class GeminiOverlayWindow(QMainWindow):
         self.append_ai_response_placeholder()
 
         # Start background worker
-        model = self.cfg.data.get("model", "gemini-2.5-flash")
+        model = self.cfg.data.get("model", "gemini-3.8-flash")
         self.text_worker = GeminiTextWorker(api_key, model, prompt, image)
         self.text_worker.chunk_received.connect(self.on_chunk_received)
         self.text_worker.finished.connect(self.on_query_finished)
@@ -1789,7 +1816,7 @@ class GeminiOverlayWindow(QMainWindow):
         self.lbl_status.setText("Connecting Live...")
         self.btn_stop_audio.show()
 
-        live_model = self.cfg.data.get("live_model", "gemini-2.5-flash")
+        live_model = self.cfg.data.get("live_model", "gemini-3.8-live")
         voice_name = self.cfg.data.get("voice_name", "Puck")
         in_dev = self.cfg.data.get("input_device")
         out_dev = self.cfg.data.get("output_device")
