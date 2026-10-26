@@ -651,9 +651,9 @@ export default function App() {
                             onChange={e => setSimModel(e.target.value)}
                             className="w-full bg-[#120e22] border border-white/15 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none"
                           >
-                            <option value="gemini-3.8-flash">gemini-3.8-flash (Free Tier Flagship - Default)</option>
-                            <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Free Tier Ultra-Fast)</option>
-                            <option value="gemini-flash-latest">gemini-flash-latest (Free Tier Latest Stable)</option>
+                            <option value="gemini-3.8-flash">gemini-3.8-flash (Flagship Default - Text & Vision)</option>
+                            <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Lightweight & High-Frequency)</option>
+                            <option value="gemini-2.5-flash">gemini-2.5-flash (Compatibility Fallback)</option>
                           </select>
                         </div>
 

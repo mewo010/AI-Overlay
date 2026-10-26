@@ -132,7 +132,7 @@ class ConfigManager:
     DEFAULT_CONFIG = {
         "api_key_encrypted": "",
         "model": "gemini-3.8-flash",
-        "live_model": "gemini-3.8-live",
+        "live_model": "gemini-3.8-flash",
         "hotkey_toggle": "Ctrl+Shift+Space",
         "hotkey_voice": "Ctrl+Shift+V",
         "start_with_windows": False,
@@ -206,19 +206,18 @@ class ConfigManager:
             except Exception as e:
                 print(f"[Config] Failed to load config, using defaults: {e}")
 
-        # Automatically migrate deprecated model names (e.g., gemini-2.5-flash) to active Gemini models
-        deprecated_models = {
-            "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite",
-            "gemini-2.0-flash", "gemini-2.0-pro", "gemini-1.5-flash", "gemini-1.5-pro",
-            "gemini-2.0-flash-exp"
-        }
+        # Strictly enforce valid free-tier models:
+        # 1. gemini-3.8-flash (default flagship)
+        # 2. gemini-3.5-flash-lite (lightweight/high-frequency)
+        # 3. gemini-2.5-flash (compatibility fallback)
+        valid_models = {"gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"}
         migrated = False
-        if self.data.get("model") in deprecated_models or not self.data.get("model"):
+        if self.data.get("model") not in valid_models:
             self.data["model"] = "gemini-3.8-flash"
             migrated = True
 
-        if self.data.get("live_model") in deprecated_models or not self.data.get("live_model"):
-            self.data["live_model"] = "gemini-3.8-live"
+        if self.data.get("live_model") not in {"gemini-3.8-flash", "gemini-2.5-flash"}:
+            self.data["live_model"] = "gemini-3.8-flash"
             migrated = True
 
         if migrated:
@@ -233,7 +232,11 @@ class ConfigManager:
             print(f"[Config] Failed to save config: {e}")
 
     def get_api_key(self) -> str:
-        return self.decrypt_secret(self.data.get("api_key_encrypted", ""))
+        """Retrieves DPAPI encrypted key, falling back to GEMINI_API_KEY env variable."""
+        saved_key = self.decrypt_secret(self.data.get("api_key_encrypted", ""))
+        if saved_key:
+            return saved_key
+        return os.environ.get("GEMINI_API_KEY", "").strip()
 
     def set_api_key(self, raw_key: str):
         self.data["api_key_encrypted"] = self.encrypt_secret(raw_key.strip())
@@ -458,40 +461,59 @@ class GeminiTextWorker(QThread):
         self.image = image
 
     def run(self):
-        if not self.api_key:
-            self.error.emit("API Key is missing. Open Settings to set your Gemini API key.")
+        api_key = self.api_key or os.environ.get("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            self.error.emit("API Key is missing. Open Settings to set your Gemini API key, or set the GEMINI_API_KEY environment variable.")
             return
 
-        try:
-            client = genai.Client(api_key=self.api_key)
-            contents = []
+        client = genai.Client(api_key=api_key)
+        contents = []
 
-            # Add vision image if present
-            if self.image is not None:
-                contents.append(self.image)
+        if self.image is not None:
+            contents.append(self.image)
 
-            prompt_text = self.prompt.strip()
-            if not prompt_text and self.image is not None:
-                prompt_text = "Analyze this screen capture in detail. Explain what you see, highlight relevant UI elements, and summarize any errors or actionable items."
-            contents.append(prompt_text)
+        prompt_text = self.prompt.strip()
+        if not prompt_text and self.image is not None:
+            prompt_text = "Analyze this screen capture in detail. Explain what you see, highlight relevant UI elements, and summarize any errors or actionable items."
+        contents.append(prompt_text)
 
-            response_stream = client.models.generate_content_stream(
-                model=self.model,
-                contents=contents
-            )
+        # Standard free-tier models and fallback sequence for 503 UNAVAILABLE or traffic spikes
+        candidate_models = [self.model or "gemini-3.8-flash"]
+        if "gemini-3.5-flash-lite" not in candidate_models:
+            candidate_models.append("gemini-3.5-flash-lite")
+        if "gemini-2.5-flash" not in candidate_models:
+            candidate_models.append("gemini-2.5-flash")
 
-            full_text = []
-            for chunk in response_stream:
-                if chunk.text:
-                    full_text.append(chunk.text)
-                    self.chunk_received.emit(chunk.text)
+        last_error = None
+        for attempt_model in candidate_models:
+            for retry in range(2):
+                try:
+                    response_stream = client.models.generate_content_stream(
+                        model=attempt_model,
+                        contents=contents
+                    )
 
-            self.finished.emit("".join(full_text))
+                    full_text = []
+                    for chunk in response_stream:
+                        if chunk.text:
+                            full_text.append(chunk.text)
+                            self.chunk_received.emit(chunk.text)
 
-        except Exception as e:
-            err_msg = str(e)
-            print(f"[GeminiWorker] Error during streaming: {traceback.format_exc()}")
-            self.error.emit(f"Gemini API Error: {err_msg}")
+                    self.finished.emit("".join(full_text))
+                    return
+
+                except Exception as e:
+                    last_error = e
+                    err_msg = str(e)
+                    print(f"[GeminiWorker] Attempt with {attempt_model} (attempt {retry+1}) failed: {err_msg}")
+                    # If 503 UNAVAILABLE (traffic/quota spike), backoff and retry or fallback
+                    if "503" in err_msg or "UNAVAILABLE" in err_msg:
+                        time.sleep(1.2)
+                        continue
+                    # For other errors, advance to next fallback model immediately
+                    break
+
+        self.error.emit(f"Gemini API Error: {last_error}")
 
 
 # ==============================================================================
@@ -523,55 +545,59 @@ class TTSWorker(QThread):
             pass
 
     def run(self):
-        if not self.api_key or not self.text:
+        api_key = self.api_key or os.environ.get("GEMINI_API_KEY", "").strip()
+        if not api_key or not self.text:
             return
 
-        try:
-            self.started_speaking.emit()
-            client = genai.Client(api_key=self.api_key)
+        self.started_speaking.emit()
+        client = genai.Client(api_key=api_key)
 
-            # Query unary TTS using official TTS model
-            response = client.models.generate_content(
-                model="gemini-3.8-flash-lite-tts",
-                contents=self.text,
-                config=types.GenerateContentConfig(
-                    response_modalities=["AUDIO"],
-                    speech_config=types.SpeechConfig(
-                        voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                voice_name=self.voice_name
+        # Standard free-tier models with audio modality support
+        tts_models = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
+        for tts_model in tts_models:
+            if self._is_cancelled:
+                break
+            try:
+                response = client.models.generate_content(
+                    model=tts_model,
+                    contents=self.text,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["AUDIO"],
+                        speech_config=types.SpeechConfig(
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                    voice_name=self.voice_name
+                                )
                             )
                         )
                     )
                 )
-            )
 
-            if self._is_cancelled:
-                return
+                if self._is_cancelled:
+                    return
 
-            candidates = getattr(response, "candidates", [])
-            if candidates and candidates[0].content and candidates[0].content.parts:
-                part = candidates[0].content.parts[0]
-                if hasattr(part, "inline_data") and part.inline_data:
-                    audio_bytes = part.inline_data.data
-                    if isinstance(audio_bytes, str):
-                        audio_bytes = base64.b64decode(audio_bytes)
+                candidates = getattr(response, "candidates", [])
+                if candidates and candidates[0].content and candidates[0].content.parts:
+                    part = candidates[0].content.parts[0]
+                    if hasattr(part, "inline_data") and part.inline_data:
+                        audio_bytes = part.inline_data.data
+                        if isinstance(audio_bytes, str):
+                            audio_bytes = base64.b64decode(audio_bytes)
 
-                    # 24kHz mono 16-bit PCM playback
-                    # Skip 44-byte WAV header if present (RIFF header)
-                    if audio_bytes.startswith(b"RIFF"):
-                        audio_bytes = audio_bytes[44:]
+                        if audio_bytes.startswith(b"RIFF"):
+                            audio_bytes = audio_bytes[44:]
 
-                    pcm_data = np.frombuffer(audio_bytes, dtype=np.int16)
-                    sd.play(pcm_data, samplerate=24000, device=self.output_device)
-                    sd.wait()
+                        pcm_data = np.frombuffer(audio_bytes, dtype=np.int16)
+                        sd.play(pcm_data, samplerate=24000, device=self.output_device)
+                        sd.wait()
+                        self.finished_speaking.emit()
+                        return
 
-            self.finished_speaking.emit()
+            except Exception as e:
+                print(f"[TTSWorker] Audio generation with {tts_model} failed: {e}")
+                continue
 
-        except Exception as e:
-            print(f"[TTSWorker] Error: {e}")
-            self.error.emit(str(e))
-            self.finished_speaking.emit()
+        self.finished_speaking.emit()
 
 
 # ==============================================================================
@@ -598,7 +624,7 @@ class LiveAudioSessionWorker(QThread):
     def __init__(
         self,
         api_key: str,
-        live_model: str = "gemini-3.8-live",
+        live_model: str = "gemini-3.8-flash",
         voice_name: str = "Puck",
         input_device: Optional[int] = None,
         output_device: Optional[int] = None,
@@ -677,8 +703,9 @@ class LiveAudioSessionWorker(QThread):
         client = genai.Client(api_key=self.api_key)
 
         # Configure Live Connect parameters
+        # Use standard string modality ["AUDIO"] (not non-existent types.LiveModality)
         live_config = types.LiveConnectConfig(
-            response_modalities=[types.LiveModality.AUDIO],
+            response_modalities=["AUDIO"],
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -1435,24 +1462,26 @@ class GeminiOverlayWindow(QMainWindow):
         key_box.addWidget(self.btn_show_key)
         layout.addLayout(key_box)
 
-        # 2. Text/Vision Model Dropdown (Active Free API Tier Models)
+        # 2. Text/Vision Model Dropdown (Valid Free API Tier Models)
         lbl_model = QLabel("Text & Vision Model:")
         layout.addWidget(lbl_model)
         self.cb_model = QComboBox()
-        # Active free API tier models
+        # Official free-tier models:
+        # - gemini-3.8-flash (Default flagship for general text, multimodal & tool calling)
+        # - gemini-3.5-flash-lite (Lightweight or high-frequency tasks)
+        # - gemini-2.5-flash (Compatibility fallback)
         free_models = [
-            "gemini-3.8-flash",       # Free Tier Flagship (Text, Code, Vision)
-            "gemini-3.1-flash-lite",  # Free Tier Ultra-Fast (Low Latency)
-            "gemini-flash-latest",    # Free Tier (Tracks Latest Stable Flash)
+            "gemini-3.8-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-2.5-flash",
         ]
         self.cb_model.addItems(free_models)
-        self.cb_model.setEditable(True)  # Allows entering any custom model identifier
         current_model = self.cfg.data.get("model", "gemini-3.8-flash")
         idx = self.cb_model.findText(current_model)
         if idx >= 0:
             self.cb_model.setCurrentIndex(idx)
         else:
-            self.cb_model.setEditText(current_model)
+            self.cb_model.setCurrentIndex(0)
         layout.addWidget(self.cb_model)
 
         # 3. Hotkey configuration
