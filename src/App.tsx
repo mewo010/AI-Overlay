@@ -66,22 +66,18 @@ on:
       - main
       - master
     tags:
+      - 'v*'
       - 'v*.*.*'
   pull_request:
     branches:
       - main
   workflow_dispatch:
     inputs:
-      create_release:
-        description: 'Publish as GitHub Release?'
-        type: boolean
-        required: false
-        default: true
       tag_name:
-        description: 'Release tag name (e.g. v1.0.0)'
+        description: 'Release tag name (leave blank to auto-version by run number, e.g. v1.0.1)'
         type: string
         required: false
-        default: 'v1.0.0'
+        default: ''
 
 permissions:
   contents: write
@@ -149,13 +145,8 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
-    if: |
-      always() &&
-      needs.build.result == 'success' &&
-      (
-        startsWith(github.ref, 'refs/tags/v') ||
-        (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
-      )
+    # Publish on branch pushes (main/master), git tags, and manual dispatches (skip only for pull requests)
+    if: needs.build.result == 'success' && github.event_name != 'pull_request'
 
     steps:
       - name: Download Build Artifact
@@ -164,11 +155,25 @@ jobs:
           name: GeminiOverlay-windows-x64
           path: dist
 
+      - name: Determine Release Tag
+        id: tag_info
+        shell: bash
+        run: |
+          if [ "\${{ github.ref_type }}" = "tag" ]; then
+            TAG="\${{ github.ref_name }}"
+          elif [ -n "\${{ inputs.tag_name }}" ]; then
+            TAG="\${{ inputs.tag_name }}"
+          else
+            TAG="v1.0.\${{ github.run_number }}"
+          fi
+          echo "release_tag=\$TAG" >> \$GITHUB_OUTPUT
+          echo "Using release tag: \$TAG"
+
       - name: Publish Release with Assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: \${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag_name || 'v1.0.0' }}
-          name: \${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag_name || 'v1.0.0' }}
+          tag_name: \${{ steps.tag_info.outputs.release_tag }}
+          name: GeminiOverlay \${{ steps.tag_info.outputs.release_tag }}
           files: |
             dist/GeminiOverlay.exe
             dist/checksums.sha256
