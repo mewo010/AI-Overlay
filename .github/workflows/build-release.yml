@@ -1,0 +1,100 @@
+name: Build & Release GeminiOverlay
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Standalone Windows Executable
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -r requirements.txt
+
+      - name: Package with PyInstaller
+        shell: pwsh
+        run: |
+          pyinstaller `
+            --noconsole `
+            --onefile `
+            --name GeminiOverlay `
+            --clean `
+            --hidden-import pynput.keyboard._win32 `
+            --hidden-import pynput.mouse._win32 `
+            --collect-submodules google.genai `
+            --collect-submodules sounddevice `
+            --collect-data sounddevice `
+            --collect-binaries sounddevice `
+            main.py
+
+      - name: Verify Executable Creation
+        shell: pwsh
+        run: |
+          if (Test-Path "dist\GeminiOverlay.exe") {
+            $size = (Get-Item "dist\GeminiOverlay.exe").Length / 1MB
+            Write-Host "Success: dist\GeminiOverlay.exe created ($([math]::Round($size, 2)) MB)"
+            # Compute SHA256 for release checksums
+            Get-FileHash -Algorithm SHA256 "dist\GeminiOverlay.exe" | Out-File "dist\checksums.sha256"
+            Get-Content "dist\checksums.sha256"
+          } else {
+            Write-Error "dist\GeminiOverlay.exe not found!"
+            exit 1
+          }
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeminiOverlay-windows-x64
+          path: |
+            dist/GeminiOverlay.exe
+            dist/checksums.sha256
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download Build Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: GeminiOverlay-windows-x64
+          path: dist
+
+      - name: Publish Release with Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/GeminiOverlay.exe
+            dist/checksums.sha256
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

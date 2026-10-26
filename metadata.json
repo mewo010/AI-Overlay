@@ -1,0 +1,8 @@
+{
+  "name": "GeminiOverlay - Windows AI Assistant",
+  "description": "Production Windows floating AI assistant in PyQt6 with two-way voice conversation, system tray, global hotkeys, DPAPI encryption, and PyInstaller release workflows.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

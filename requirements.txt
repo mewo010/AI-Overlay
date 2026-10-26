@@ -1,0 +1,27 @@
+# GeminiOverlay - Python Dependencies
+# Compatible with Python 3.10, 3.11, and 3.12 on Windows 10/11 (64-bit)
+
+# Official Google GenAI SDK (supports Gemini 2.5/3.8 and Gemini Live API)
+google-genai>=2.4.0
+
+# Desktop GUI Framework (Qt6)
+PyQt6>=6.6.0
+PyQt6-Qt6>=6.6.0
+
+# Global system hotkeys
+pynput>=1.7.7
+
+# Screen capture and image processing
+Pillow>=10.2.0
+
+# Windows Win32 APIs (DPAPI encryption, window foreground focus, registry, winreg)
+pywin32>=306
+
+# Real-time microphone capture and low-latency audio playback
+sounddevice>=0.4.6
+
+# High-performance audio buffer manipulation
+numpy>=1.26.0
+
+# Windows standalone executable packaging
+pyinstaller>=6.5.0
