@@ -52,7 +52,8 @@ from google.genai import types
 # PyQt6 GUI framework
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, pyqtSlot, QPoint, QRect, QSize,
-    QLockFile, QDir, QTimer, QObject, QEvent
+    QLockFile, QDir, QTimer, QObject, QEvent, QPropertyAnimation,
+    QEasingCurve, QParallelAnimationGroup
 )
 from PyQt6.QtGui import (
     QIcon, QPixmap, QPainter, QColor, QRadialGradient, QLinearGradient,
@@ -139,14 +140,14 @@ class ConfigManager:
         "voice_name": "Puck",
         "input_device": None,
         "output_device": None,
-        "speak_typed_answers": False,
+        "speak_typed_answers": True,  # Read answers aloud automatically
         "headphones_mode": False,
         "pin_active": False,
         "window_geometry": {
             "x": -1,
             "y": -1,
-            "width": 460,
-            "height": 620
+            "width": 640,
+            "height": 430
         }
     }
 
@@ -928,9 +929,9 @@ class PromptInputBox(QPlainTextEdit):
 
 class GeminiOverlayWindow(QMainWindow):
     """
-    Frameless, always-on-top, translucent floating window with purple-to-dark
-    glassmorphism gradient card, 22px rounded corners, Segoe UI font,
-    draggable title bar, and system tray integration.
+    Frameless, always-on-top, translucent bottom-center floating assistant
+    with smooth slide-up/fade animations, pristine Markdown streaming,
+    instant voice input, and automatic text-to-speech audio playback.
     """
     def __init__(self, config_manager: ConfigManager, startup_manager: StartupManager):
         super().__init__()
@@ -945,7 +946,11 @@ class GeminiOverlayWindow(QMainWindow):
         # State
         self.is_pinned = self.cfg.data.get("pin_active", False)
         self.is_voice_active = False
-        self.current_response_text = ""
+        self.is_animating_hide = False
+        self.chat_messages: List[Dict[str, Any]] = []
+        self.current_ai_text = ""
+        self.anim_group: Optional[QParallelAnimationGroup] = None
+        self.anim_hide: Optional[QParallelAnimationGroup] = None
 
         # Setup Window Properties
         self.init_window_flags()
@@ -957,11 +962,11 @@ class GeminiOverlayWindow(QMainWindow):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool  # Tool prevents taskbar clutter
+            Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setMinimumSize(380, 500)
-        self.resize(460, 640)
+        self.setMinimumSize(480, 260)
+        self.resize(640, 430)
 
     def init_ui(self):
         """Builds modern glassmorphic card container."""
@@ -1645,7 +1650,7 @@ class GeminiOverlayWindow(QMainWindow):
         QTimer.singleShot(2500, lambda: self.lbl_save_status.setText(""))
 
     # --------------------------------------------------------------------------
-    # Text Chat & Vision Handling
+    # Text Chat & Vision Handling (Clean In-Place Rendering & Auto-TTS)
     # --------------------------------------------------------------------------
 
     def handle_send_text(self):
@@ -1654,7 +1659,11 @@ class GeminiOverlayWindow(QMainWindow):
             return
 
         self.prompt_edit.clear()
-        self.append_user_message(prompt)
+        # Add user message and pending model response
+        self.chat_messages.append({"role": "user", "text": prompt, "image": False})
+        self.current_ai_text = ""
+        self.chat_messages.append({"role": "model", "text": "", "is_streaming": True})
+        self.render_chat_view(is_streaming=True)
         self.execute_gemini_query(prompt, image=None)
 
     def handle_capture_screen(self):
@@ -1664,14 +1673,14 @@ class GeminiOverlayWindow(QMainWindow):
 
         # If live voice session is active, inject frame directly into live stream
         if self.is_voice_active and self.live_worker:
-            self.append_user_message("[Look at my screen 📷]")
+            self.chat_messages.append({"role": "user", "text": "[Look at my screen 📷]", "image": True})
+            self.render_chat_view(is_streaming=False)
             self.live_worker.trigger_screen_analysis()
             return
 
-        # Regular vision query
         self.hide()
         QApplication.processEvents()
-        time.sleep(0.2)  # Allow compositor to update
+        time.sleep(0.2)
 
         try:
             screenshot = ImageGrab.grab()
@@ -1682,7 +1691,10 @@ class GeminiOverlayWindow(QMainWindow):
 
         self.show_overlay()
         msg_header = f"[Captured Screen 📷] {prompt}" if prompt else "[Captured Screen 📷]"
-        self.append_user_message(msg_header)
+        self.chat_messages.append({"role": "user", "text": msg_header, "image": True})
+        self.current_ai_text = ""
+        self.chat_messages.append({"role": "model", "text": "", "is_streaming": True})
+        self.render_chat_view(is_streaming=True)
         self.execute_gemini_query(prompt, image=screenshot)
 
     def execute_gemini_query(self, prompt: str, image: Optional[Image.Image] = None):
@@ -1692,17 +1704,11 @@ class GeminiOverlayWindow(QMainWindow):
             self.switch_tab(1)
             return
 
-        # Prepare UI for response streaming
         self.lbl_status.setText("Thinking...")
         self.spinner.show()
         self.btn_send.setEnabled(False)
         self.btn_screen.setEnabled(False)
-        self.current_response_text = ""
 
-        # Prepare AI response placeholder
-        self.append_ai_response_placeholder()
-
-        # Start background worker
         model = self.cfg.data.get("model", "gemini-3.8-flash")
         self.text_worker = GeminiTextWorker(api_key, model, prompt, image)
         self.text_worker.chunk_received.connect(self.on_chunk_received)
@@ -1712,8 +1718,11 @@ class GeminiOverlayWindow(QMainWindow):
 
     @pyqtSlot(str)
     def on_chunk_received(self, chunk: str):
-        self.current_response_text += chunk
-        self.update_streaming_ai_response(self.current_response_text)
+        # Accumulate streaming text and update only the active model response in-place
+        self.current_ai_text += chunk
+        if self.chat_messages and self.chat_messages[-1]["role"] == "model":
+            self.chat_messages[-1]["text"] = self.current_ai_text
+        self.render_chat_view(is_streaming=True)
 
     @pyqtSlot(str)
     def on_query_finished(self, full_text: str):
@@ -1721,10 +1730,14 @@ class GeminiOverlayWindow(QMainWindow):
         self.spinner.hide()
         self.btn_send.setEnabled(True)
         self.btn_screen.setEnabled(True)
-        self.update_streaming_ai_response(full_text, is_complete=True)
 
-        # If Speak typed answers is enabled, read aloud
-        if self.cfg.data.get("speak_typed_answers", False) and full_text.strip():
+        if self.chat_messages and self.chat_messages[-1]["role"] == "model":
+            self.chat_messages[-1]["text"] = full_text
+            self.chat_messages[-1]["is_streaming"] = False
+        self.render_chat_view(is_streaming=False)
+
+        # Read the answer aloud with TTS automatically
+        if self.cfg.data.get("speak_typed_answers", True) and full_text.strip():
             self.speak_text_aloud(full_text)
 
     @pyqtSlot(str)
@@ -1736,7 +1749,7 @@ class GeminiOverlayWindow(QMainWindow):
         self.append_error(err_msg)
 
     def speak_text_aloud(self, text: str):
-        """Triggers TTS Worker for typed responses."""
+        """Triggers TTS Worker to speak answers aloud with Gemini's voice."""
         self.stop_all_audio()
         api_key = self.cfg.get_api_key()
         voice_name = self.cfg.data.get("voice_name", "Puck")
@@ -1755,68 +1768,81 @@ class GeminiOverlayWindow(QMainWindow):
         self.btn_stop_audio.hide()
 
     # --------------------------------------------------------------------------
-    # HTML Chat Rendering Utilities
+    # Pristine HTML Chat Rendering (No text jumping or scattering)
     # --------------------------------------------------------------------------
 
-    def append_user_message(self, text: str):
-        # Escape HTML entities
+    def render_chat_view(self, is_streaming: bool = False):
+        """Renders the entire conversation cleanly in one pristine HTML update."""
         import html
-        escaped = html.escape(text).replace("\n", "<br>")
-        user_html = f"""
-        <div style="margin: 12px 0 6px 0; text-align: right;">
-            <div style="display: inline-block; background: rgba(147, 51, 234, 0.25); border: 1px solid rgba(168, 85, 247, 0.4); border-radius: 12px; padding: 8px 14px; color: #f8fafc; font-size: 13px; text-align: left; max-width: 85%;">
-                <b>You:</b> {escaped}
-            </div>
-        </div>
-        """
-        self.browser.append(user_html)
-        self.scroll_to_bottom()
-
-    def append_ai_response_placeholder(self):
-        ai_html = """
-        <div style="margin: 6px 0 12px 0; text-align: left;">
-            <div style="color: #c084fc; font-weight: bold; font-size: 12px; margin-bottom: 4px;">Gemini:</div>
-            <div id="ai_streaming_block" style="color: #e2e8f0; font-size: 13px; line-height: 1.5;">
-                <span style="color: #94a3b8; font-style: italic;">...</span>
-            </div>
-        </div>
-        """
-        self.browser.append(ai_html)
-        self.scroll_to_bottom()
-
-    def update_streaming_ai_response(self, text: str, is_complete: bool = False):
-        import html
-        # Basic markdown code block and bold formatting
-        formatted = html.escape(text)
-        # Format code blocks ```code```
         import re
-        formatted = re.sub(
-            r"```(.*?)```",
-            r"<pre style='background: #110d22; border: 1px solid #3b2d64; border-radius: 8px; padding: 8px; color: #38bdf8; font-family: Consolas, monospace;'>\1</pre>",
-            formatted,
-            flags=re.DOTALL
-        )
-        formatted = re.sub(r"`([^`]+)`", r"<code style='background: #1e1638; padding: 2px 4px; border-radius: 4px; color: #f472b6;'>\1</code>", formatted)
-        formatted = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", formatted)
-        formatted = formatted.replace("\n", "<br>")
 
-        cursor = '<span style="color: #a855f7;">▌</span>' if not is_complete else ""
-        content_html = f"<div style='margin-bottom: 8px;'>{formatted}{cursor}</div>"
+        blocks = []
+        for msg in self.chat_messages:
+            role = msg.get("role", "")
+            raw = msg.get("text", "")
+            escaped = html.escape(raw)
 
-        # Append chunk cleanly
-        self.browser.insertHtml(content_html)
+            # Markdown code blocks
+            formatted = re.sub(
+                r"```(.*?)```",
+                r"<pre style='background: #110d22; border: 1px solid #3b2d64; border-radius: 8px; padding: 10px; color: #38bdf8; font-family: Consolas, monospace; font-size: 12px; margin: 6px 0;'>\1</pre>",
+                escaped,
+                flags=re.DOTALL
+            )
+            # Inline code
+            formatted = re.sub(r"`([^`]+)`", r"<code style='background: #1e1638; padding: 2px 5px; border-radius: 4px; color: #f472b6;'>\1</code>", formatted)
+            # Bold
+            formatted = re.sub(r"\*\*([^*]+)\*\*", r"<b style='color:#ffffff;'>\1</b>", formatted)
+            formatted = formatted.replace("\n", "<br>")
+
+            if role == "user":
+                img_badge = "<span style='color: #c084fc; font-weight: bold;'>[Screen Capture 📷] </span>" if msg.get("image") else ""
+                blocks.append(f"""
+                <div style="margin: 10px 0 6px 0; text-align: right;">
+                    <div style="display: inline-block; background: rgba(147, 51, 234, 0.28); border: 1px solid rgba(168, 85, 247, 0.45); border-radius: 14px; padding: 8px 14px; color: #f8fafc; font-size: 13px; text-align: left; max-width: 85%;">
+                        <b style="color: #d8b4fe;">You:</b> {img_badge}{formatted}
+                    </div>
+                </div>
+                """)
+            elif role == "model":
+                cursor = '<span style="color: #c084fc; font-weight: bold;"> ▌</span>' if msg.get("is_streaming") else ""
+                blocks.append(f"""
+                <div style="margin: 6px 0 12px 0; text-align: left;">
+                    <div style="color: #c084fc; font-weight: bold; font-size: 12px; margin-bottom: 4px;">✦ Gemini:</div>
+                    <div style="background: rgba(18, 14, 34, 0.7); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 14px; padding: 10px 14px; color: #e2e8f0; font-size: 13px; line-height: 1.6;">
+                        {formatted}{cursor}
+                    </div>
+                </div>
+                """)
+            elif role == "error":
+                blocks.append(f"""
+                <div style="margin: 8px 0; background: rgba(239, 68, 68, 0.15); border-left: 3px solid #ef4444; padding: 8px 12px; border-radius: 6px; color: #fca5a5; font-size: 12.5px;">
+                    <b>Error:</b> {formatted}
+                </div>
+                """)
+
+        if not blocks:
+            self.render_initial_welcome()
+            return
+
+        doc_html = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', -apple-system, sans-serif; margin: 4px; padding: 0; background: transparent; color: #e2e8f0; }}
+            </style>
+        </head>
+        <body>
+            {"".join(blocks)}
+        </body>
+        </html>
+        """
+        self.browser.setHtml(doc_html)
         self.scroll_to_bottom()
 
     def append_error(self, err_text: str):
-        import html
-        escaped = html.escape(err_text)
-        err_html = f"""
-        <div style="margin: 8px 0; background: rgba(239, 68, 68, 0.15); border-left: 3px solid #ef4444; padding: 8px 12px; border-radius: 6px; color: #fca5a5; font-size: 12.5px;">
-            <b>Error:</b> {escaped}
-        </div>
-        """
-        self.browser.append(err_html)
-        self.scroll_to_bottom()
+        self.chat_messages.append({"role": "error", "text": err_text})
+        self.render_chat_view(is_streaming=False)
 
     def scroll_to_bottom(self):
         scrollbar = self.browser.verticalScrollBar()
@@ -1885,11 +1911,16 @@ class GeminiOverlayWindow(QMainWindow):
 
     @pyqtSlot(str)
     def on_live_user_transcription(self, text: str):
-        self.append_user_message(f"[Voice] {text}")
+        self.chat_messages.append({"role": "user", "text": f"[Voice] {text}", "image": False})
+        self.render_chat_view(is_streaming=False)
 
     @pyqtSlot(str)
     def on_live_model_transcription(self, text: str):
-        self.update_streaming_ai_response(text, is_complete=True)
+        if not self.chat_messages or self.chat_messages[-1].get("role") != "model":
+            self.chat_messages.append({"role": "model", "text": text, "is_streaming": False})
+        else:
+            self.chat_messages[-1]["text"] = text
+        self.render_chat_view(is_streaming=False)
 
     @pyqtSlot(str)
     def on_live_error(self, err: str):
@@ -1904,26 +1935,103 @@ class GeminiOverlayWindow(QMainWindow):
         self.lbl_status.setText("")
 
     # --------------------------------------------------------------------------
-    # Window Visibility & Placement
+    # Bottom-Middle Spotlight Window Positioning & Smooth Slide Animations
     # --------------------------------------------------------------------------
 
-    def toggle_overlay(self):
-        if self.isVisible():
-            self.hide_overlay()
-        else:
-            self.show_overlay()
+    def calculate_bottom_center_geometry(self, w: int = 640, h: int = 430) -> QRect:
+        """Calculates precise bottom-center coordinates above the Windows taskbar."""
+        primary = QGuiApplication.primaryScreen()
+        if not primary:
+            return QRect(200, 200, w, h)
+        avail = primary.availableGeometry()
+        x = avail.x() + (avail.width() - w) // 2
+        y = avail.bottom() - h - 35  # 35px above taskbar
+        return QRect(x, y, w, h)
 
-    def show_overlay(self):
+    def show_overlay(self, start_voice: bool = False):
+        """Pops up the assistant at the bottom middle with a slide-up fade animation."""
+        target_rect = self.calculate_bottom_center_geometry(self.width(), self.height())
+        start_rect = QRect(target_rect.x(), target_rect.y() + 45, target_rect.width(), target_rect.height())
+
+        self.setGeometry(start_rect)
+        self.setWindowOpacity(0.0)
         self.show()
         self.raise_()
         self.activateWindow()
         force_activate_window(int(self.winId()))
         self.prompt_edit.setFocus()
 
+        # Slide-up and fade-in animation
+        self.anim_group = QParallelAnimationGroup(self)
+
+        pos_anim = QPropertyAnimation(self, b"geometry")
+        pos_anim.setDuration(220)
+        pos_anim.setStartValue(start_rect)
+        pos_anim.setEndValue(target_rect)
+        pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        fade_anim = QPropertyAnimation(self, b"windowOpacity")
+        fade_anim.setDuration(220)
+        fade_anim.setStartValue(0.0)
+        fade_anim.setEndValue(1.0)
+        fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self.anim_group.addAnimation(pos_anim)
+        self.anim_group.addAnimation(fade_anim)
+        self.anim_group.start()
+
+        if start_voice and not self.is_voice_active:
+            QTimer.singleShot(240, self.start_voice_session)
+
     def hide_overlay(self):
-        # Save geometry before hiding
+        """Hides the assistant with a smooth slide-down and fade-out animation."""
+        if not self.isVisible() or self.is_animating_hide:
+            return
+
+        self.is_animating_hide = True
         self.save_geometry()
-        self.hide()
+
+        current_rect = self.geometry()
+        end_rect = QRect(current_rect.x(), current_rect.y() + 35, current_rect.width(), current_rect.height())
+
+        self.anim_hide = QParallelAnimationGroup(self)
+
+        pos_anim = QPropertyAnimation(self, b"geometry")
+        pos_anim.setDuration(160)
+        pos_anim.setStartValue(current_rect)
+        pos_anim.setEndValue(end_rect)
+        pos_anim.setEasingCurve(QEasingCurve.Type.InQuad)
+
+        fade_anim = QPropertyAnimation(self, b"windowOpacity")
+        fade_anim.setDuration(160)
+        fade_anim.setStartValue(self.windowOpacity())
+        fade_anim.setEndValue(0.0)
+        fade_anim.setEasingCurve(QEasingCurve.Type.InQuad)
+
+        self.anim_hide.addAnimation(pos_anim)
+        self.anim_hide.addAnimation(fade_anim)
+
+        def on_hide_finished():
+            self.hide()
+            self.is_animating_hide = False
+            self.stop_all_audio()
+
+        self.anim_hide.finished.connect(on_hide_finished)
+        self.anim_hide.start()
+
+    def toggle_overlay(self):
+        """Toggles the bottom-middle box with animation."""
+        if self.isVisible() and not self.is_animating_hide:
+            self.hide_overlay()
+        else:
+            self.show_overlay(start_voice=False)
+
+    def show_and_start_voice(self):
+        """Shortcut action: pops up and immediately initiates two-way voice conversation."""
+        if not self.isVisible() or self.is_animating_hide:
+            self.show_overlay(start_voice=True)
+        else:
+            self.toggle_voice_session()
 
     def save_geometry(self):
         rect = self.geometry()
@@ -2102,7 +2210,7 @@ def main():
 
     hotkey_manager = GlobalHotkeyManager(toggle_hotkey, voice_hotkey)
     hotkey_manager.toggle_requested.connect(overlay_window.toggle_overlay)
-    hotkey_manager.voice_requested.connect(overlay_window.toggle_voice_session)
+    hotkey_manager.voice_requested.connect(overlay_window.show_and_start_voice)
 
     # Attach to application object for global access
     app.hotkey_manager = hotkey_manager

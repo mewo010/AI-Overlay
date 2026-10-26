@@ -211,8 +211,10 @@ export default function App() {
   const [simApiKey, setSimApiKey] = useState('AIzaSyD...•[DPAPI Encrypted]');
   const [simSavedFeedback, setSimSavedFeedback] = useState(false);
 
-  // Dragging simulator window
-  const [simPos, setSimPos] = useState({ x: 120, y: 50 });
+  const [simTtsSpeaking, setSimTtsSpeaking] = useState(false);
+
+  // Dragging simulator window (null indicates bottom-center default)
+  const [simPos, setSimPos] = useState<{ x: number; y: number } | null>(null);
   const isDragging = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
 
@@ -272,10 +274,12 @@ export default function App() {
         ...prev,
         {
           sender: 'gemini',
-          text: `Executing on Windows via \`${simModel}\`:\n\n\`\`\`powershell\n# Live response streamed through QThread to PyQt6\nGet-Process | Where-Object WorkingSet -gt 200MB | Select-Object Name, WS\n\`\`\`\n\nI have retrieved the system metrics. Would you like me to analyze memory trends or monitor CPU spikes?`
+          text: `Executing on Windows via \`${simModel}\`:\n\n\`\`\`powershell\n# Clean in-place streamed response\nGet-Process | Where-Object WorkingSet -gt 200MB | Select-Object Name, WS\n\`\`\`\n\nI have retrieved your system telemetry. The answer is being read aloud with Gemini TTS!`
         }
       ]);
       setSimStreaming(false);
+      setSimTtsSpeaking(true);
+      setTimeout(() => setSimTtsSpeaking(false), 5000);
     }, 1200);
   };
 
@@ -298,13 +302,15 @@ export default function App() {
   // Window drag handlers
   const handleMouseDown = (e: React.MouseEvent) => {
     isDragging.current = true;
-    dragStart.current = { x: e.clientX - simPos.x, y: e.clientY - simPos.y };
+    const currentX = simPos?.x ?? Math.max(20, (window.innerWidth - 560) / 2);
+    const currentY = simPos?.y ?? Math.max(40, window.innerHeight - 500);
+    dragStart.current = { x: e.clientX - currentX, y: e.clientY - currentY };
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
     if (!isDragging.current) return;
-    const newX = Math.max(20, Math.min(window.innerWidth - 500, e.clientX - dragStart.current.x));
-    const newY = Math.max(20, Math.min(window.innerHeight - 600, e.clientY - dragStart.current.y));
+    const newX = Math.max(20, Math.min(window.innerWidth - 580, e.clientX - dragStart.current.x));
+    const newY = Math.max(20, Math.min(window.innerHeight - 450, e.clientY - dragStart.current.y));
     setSimPos({ x: newX, y: newY });
   };
 
@@ -421,31 +427,49 @@ export default function App() {
               </button>
             </div>
 
-            {/* FLOATING GLASSMORPHIC GEMINIOVERLAY WINDOW */}
+            {/* FLOATING GLASSMORPHIC GEMINIOVERLAY WINDOW (Bottom-Center Spotlight) */}
             {simVisible && (
               <div
-                style={{
-                  position: 'absolute',
-                  left: `${simPos.x}px`,
-                  top: `${simPos.y}px`,
-                  width: '450px',
-                  height: '590px',
-                  zIndex: 30
-                }}
-                className="rounded-[22px] p-[1px] bg-gradient-to-br from-white/20 via-purple-500/20 to-transparent shadow-2xl shadow-black/80 flex flex-col overflow-hidden backdrop-blur-2xl transition-shadow"
+                style={
+                  simPos
+                    ? {
+                        position: 'absolute',
+                        left: `${simPos.x}px`,
+                        top: `${simPos.y}px`,
+                        width: '560px',
+                        height: '430px',
+                        zIndex: 30
+                      }
+                    : {
+                        position: 'absolute',
+                        left: '50%',
+                        bottom: '55px',
+                        transform: 'translateX(-50%)',
+                        width: '560px',
+                        height: '430px',
+                        zIndex: 30
+                      }
+                }
+                className="rounded-[22px] p-[1px] bg-gradient-to-tr from-purple-500/40 via-indigo-500/30 to-cyan-400/20 shadow-2xl shadow-black/90 flex flex-col overflow-hidden backdrop-blur-2xl transition-all duration-200 animate-in fade-in slide-in-from-bottom-6"
               >
                 {/* Inner Card with purple-to-dark gradient */}
-                <div className="w-full h-full rounded-[21px] bg-gradient-to-br from-[#1a1230]/95 via-[#0f0b1e]/98 to-[#160e28]/95 p-4 flex flex-col justify-between border border-white/10 select-none">
+                <div className="w-full h-full rounded-[21px] bg-gradient-to-br from-[#1a1230]/96 via-[#0f0b1e]/98 to-[#160e28]/96 p-4 flex flex-col justify-between border border-white/10 select-none">
                   {/* Custom Draggable Title Bar */}
                   <div
                     onMouseDown={handleMouseDown}
-                    className="flex items-center justify-between pb-3 border-b border-white/10 cursor-move"
+                    className="flex items-center justify-between pb-2.5 border-b border-white/10 cursor-move"
                   >
                     <div className="flex items-center space-x-2.5">
                       <div className="w-6 h-6 rounded-lg bg-gradient-to-tr from-purple-600 to-indigo-500 flex items-center justify-center shadow-md shadow-purple-600/30">
                         <Sparkles className="w-3.5 h-3.5 text-white" />
                       </div>
                       <span className="font-semibold text-sm text-white font-['Segoe_UI'] tracking-tight">GeminiOverlay</span>
+                      {simTtsSpeaking && (
+                        <div className="flex items-center space-x-1.5 px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[10px] animate-pulse">
+                          <Volume2 className="w-3 h-3 text-emerald-400" />
+                          <span>TTS Speaking...</span>
+                        </div>
+                      )}
                     </div>
 
                     {/* Pill Segmented Tab Switcher */}
