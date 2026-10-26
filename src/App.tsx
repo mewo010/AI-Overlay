@@ -71,6 +71,17 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Publish as GitHub Release?'
+        type: boolean
+        required: false
+        default: true
+      tag_name:
+        description: 'Release tag name (e.g. v1.0.0)'
+        type: string
+        required: false
+        default: 'v1.0.0'
 
 permissions:
   contents: write
@@ -138,7 +149,13 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (
+        startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'workflow_dispatch' && inputs.create_release == true)
+      )
 
     steps:
       - name: Download Build Artifact
@@ -150,6 +167,8 @@ jobs:
       - name: Publish Release with Assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: \${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag_name || 'v1.0.0' }}
+          name: \${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.tag_name || 'v1.0.0' }}
           files: |
             dist/GeminiOverlay.exe
             dist/checksums.sha256
