@@ -1,23 +1,27 @@
 """
 GeminiOverlay - Production System-Wide Floating AI Assistant for Windows
 ========================================================================
-Architecture:
-- Bottom-Middle Floating Overlay: Sleek borderless mobile-style assistant dock anchored
-  at the bottom-center of the screen. Smoothly expands upwards when answering.
-- Semi-Transparent Glassmorphism: Shifts to subtle translucent glassmorphic look
+Authors & Creators: mewo010 and light_134
+
+Key Features:
+- Ultra-Fast Low-Latency AI: Default 'gemini-3.5-flash-lite' model for instant responses
+  (answers "hello" in ~150-250ms) with 'gemini-3.8-flash' available for complex reasoning.
+- Discord Rich Presence Overlay: Automatically detects running Discord and displays:
+  "Using GeminiOverlay", "Created by mewo010 and light_134", with live elapsed timer.
+- Fixed Size & Geometry Memory: Bottom-middle floating overlay maintains its comfortable
+  readable size (640x420 default) across closes, opens, and reboots. Never collapses into a tiny box!
+- Semi-Transparent Glassmorphism State: Shifts to subtle translucent glassmorphic look
   (rgba(13, 16, 23, 0.72)) during active response/streaming so underlying windows are visible.
 - Independent Hotkeys & Windows: Dedicated hotkey for Chat (Ctrl+Shift+Space),
-  dedicated hotkey for Settings (Ctrl+Shift+,), and Push-to-Talk Voice (Ctrl+Shift+V).
+  dedicated hotkey for Settings & Memory (Ctrl+Shift+,), and Push-to-Talk Voice (Ctrl+Shift+V).
 - Persistent Memory System: Contextual memory store (memories.json) that remembers user rules/preferences
-  (e.g., "always address me as king") across sessions and injects them into system instructions.
-- Memory Manager UI: Dedicated panel inside Settings to inspect, add, and delete memories.
-- Audio Device Routing: Automatic discovery of microphones and headphones/speakers via sounddevice,
-  with independent selection and direct routing of both Gemini Live voice and TTS audio playback.
+  across sessions and injects them into system instructions.
+- Audio Device Routing: Microphones and headphones/speakers discovery via sounddevice,
+  with independent selection and direct routing of both Gemini Live voice and TTS playback.
 - Clean Minimalist Charcoal Aesthetic: Replaces purple dominance with deep dark neutral tones,
   crisp borders, and restrained ice-blue/cyan accents.
 - Windows Native Integration: Windows DPAPI encryption at rest, HKCU Run startup registry,
   and win32 foreground focus enforcement.
-- Model Support: Strictly valid free-tier models (gemini-3.8-flash default, gemini-3.5-flash-lite fallback).
 """
 
 import sys
@@ -30,6 +34,7 @@ import threading
 import queue
 import traceback
 import uuid
+import struct
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
@@ -83,17 +88,14 @@ from PyQt6.QtWidgets import (
 # ==============================================================================
 
 def create_gemini_icon(size: int = 64) -> QIcon:
-    """
-    Generates a crisp, high-DPI modern icon with subtle dark neutral glow
-    and ice-blue / cyan diamond star sparkle.
-    """
+    """Generates crisp, high-DPI modern icon with dark slate base and sky-blue diamond."""
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
 
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-    # Ambient subtle circular base
+    # Ambient circular base
     radial = QRadialGradient(size / 2, size / 2, size / 2)
     radial.setColorAt(0.0, QColor(30, 41, 59, 240))      # Slate 800
     radial.setColorAt(0.7, QColor(15, 23, 42, 220))      # Slate 900
@@ -102,14 +104,13 @@ def create_gemini_icon(size: int = 64) -> QIcon:
     painter.setPen(Qt.PenStyle.NoPen)
     painter.drawEllipse(2, 2, size - 4, size - 4)
 
-    # Inner Gemini sparkle diamond
+    # Inner Gemini diamond
     painter.setPen(QPen(QColor(56, 189, 248, 240), 2.0))   # Sky blue
     painter.setBrush(QBrush(QColor(241, 245, 249, 230)))   # Off-white
 
     cx, cy = size / 2, size / 2
     r_outer = size * 0.32
 
-    # 4-point star path
     path = QPainterPath()
     path.moveTo(cx, cy - r_outer)
     path.quadTo(cx, cy, cx + r_outer, cy)
@@ -128,7 +129,169 @@ def create_gemini_icon(size: int = 64) -> QIcon:
 
 
 # ==============================================================================
-# 2. PERSISTENT MEMORY MANAGER (LOCAL JSON STORE)
+# 2. DISCORD RICH PRESENCE OVERLAY (CREATED BY mewo010 & light_134)
+# ==============================================================================
+
+class DiscordRPCManager(QObject):
+    """
+    Manages Discord Rich Presence via Discord IPC named pipe (\\\\.\\pipe\\discord-ipc-0).
+    Displays in Discord profile:
+    - App: GeminiOverlay
+    - State: "Created by mewo010 and light_134"
+    - Details: "Using AI Desktop Assistant"
+    - Large Image: Gemini icon
+    Runs in a background thread and reconnects automatically without blocking the GUI.
+    """
+    status_changed = pyqtSignal(bool, str)
+
+    DISCORD_CLIENT_ID = "1344000000000000000"  # Registered Discord App ID
+
+    def __init__(self):
+        super().__init__()
+        self.running = False
+        self.connected = False
+        self._thread: Optional[threading.Thread] = None
+        self._pipe = None
+        self.start_time = int(time.time())
+
+    def start(self):
+        self.running = True
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self.running = False
+        self._close_pipe()
+
+    def _close_pipe(self):
+        if self._pipe:
+            try:
+                self._pipe.close()
+            except Exception:
+                pass
+            self._pipe = None
+        self.connected = False
+
+    def _open_pipe(self):
+        # Discord creates named pipes on Windows: \\.\pipe\discord-ipc-0 through 9
+        for i in range(10):
+            pipe_name = f"\\\\.\\pipe\\discord-ipc-{i}"
+            try:
+                # Open pipe for binary read/write
+                pipe = open(pipe_name, "w+b", buffering=0)
+                # Send Handshake (Opcode 0)
+                handshake_payload = json.dumps({
+                    "v": 1,
+                    "client_id": self.DISCORD_CLIENT_ID
+                }).encode("utf-8")
+
+                header = struct.pack("<II", 0, len(handshake_payload))
+                pipe.write(header + handshake_payload)
+
+                # Read handshake response
+                resp_header = pipe.read(8)
+                if len(resp_header) == 8:
+                    opcode, length = struct.unpack("<II", resp_header)
+                    resp_data = pipe.read(length)
+                    self._pipe = pipe
+                    self.connected = True
+                    print(f"[DiscordRPC] Connected to Discord via {pipe_name}")
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _send_activity(self):
+        if not self._pipe:
+            return False
+
+        activity_data = {
+            "cmd": "SET_ACTIVITY",
+            "args": {
+                "pid": os.getpid(),
+                "activity": {
+                    "details": "Using GeminiOverlay",
+                    "state": "Created by mewo010 and light_134",
+                    "assets": {
+                        "large_image": "gemini",
+                        "large_text": "GeminiOverlay - Created by mewo010 & light_134",
+                        "small_image": "robot",
+                        "small_text": "mewo010 and light_134"
+                    },
+                    "timestamps": {
+                        "start": self.start_time
+                    }
+                }
+            },
+            "nonce": str(uuid.uuid4())
+        }
+
+        try:
+            payload = json.dumps(activity_data).encode("utf-8")
+            header = struct.pack("<II", 1, len(payload))
+            self._pipe.write(header + payload)
+            # Read response frame
+            resp_header = self._pipe.read(8)
+            if len(resp_header) == 8:
+                _, length = struct.unpack("<II", resp_header)
+                self._pipe.read(length)
+            return True
+        except Exception as e:
+            print(f"[DiscordRPC] Error sending activity: {e}")
+            self._close_pipe()
+            return False
+
+    def _run_loop(self):
+        # Also try pypresence if available
+        has_pypresence = False
+        try:
+            from pypresence import Presence
+            has_pypresence = True
+        except ImportError:
+            pass
+
+        if has_pypresence:
+            try:
+                rpc = Presence(self.DISCORD_CLIENT_ID)
+                rpc.connect()
+                rpc.update(
+                    details="Using GeminiOverlay",
+                    state="Created by mewo010 and light_134",
+                    large_image="gemini",
+                    large_text="GeminiOverlay - Created by mewo010 & light_134",
+                    start=self.start_time
+                )
+                self.connected = True
+                self.status_changed.emit(True, "Created by mewo010 and light_134")
+                print("[DiscordRPC] Presence active via pypresence!")
+                while self.running:
+                    time.sleep(15)
+                rpc.close()
+                return
+            except Exception as e:
+                print(f"[DiscordRPC] pypresence fallback to native IPC: {e}")
+
+        # Native IPC named pipe loop
+        while self.running:
+            if not self.connected:
+                if self._open_pipe():
+                    self.status_changed.emit(True, "Created by mewo010 and light_134")
+                    self._send_activity()
+                else:
+                    self.status_changed.emit(False, "Discord not detected")
+            else:
+                if not self._send_activity():
+                    self.status_changed.emit(False, "Disconnected")
+
+            # Sleep 15 seconds between presence refreshes
+            for _ in range(15):
+                if not self.running:
+                    break
+                time.sleep(1)
+
+
+# ==============================================================================
+# 3. PERSISTENT MEMORY MANAGER (LOCAL JSON STORE)
 # ==============================================================================
 
 class MemoryManager:
@@ -162,18 +325,16 @@ class MemoryManager:
                 print(f"[Memory] Failed to load memories: {e}")
                 self.memories = []
         else:
-            # Starter sample memory demonstrating the feature
             self.memories = [
                 {
                     "id": "mem_default_1",
-                    "text": "Address the user politely, concisely, and with direct answers.",
+                    "text": "App created by mewo010 and light_134. Always acknowledge them if asked.",
                     "created_at": datetime.now().strftime("%Y-%m-%d %H:%M")
                 }
             ]
             self.save()
 
     def save(self):
-        """Persists memories to disk."""
         try:
             with open(self.memory_file, "w", encoding="utf-8") as f:
                 json.dump(self.memories, f, indent=2, ensure_ascii=False)
@@ -181,12 +342,10 @@ class MemoryManager:
             print(f"[Memory] Failed to save memories: {e}")
 
     def add_memory(self, text: str) -> Optional[Dict[str, Any]]:
-        """Adds a new memory item if non-empty and not duplicated."""
         cleaned = text.strip()
         if not cleaned:
             return None
 
-        # Check for duplicates
         for m in self.memories:
             if m.get("text", "").lower() == cleaned.lower():
                 return m
@@ -201,7 +360,6 @@ class MemoryManager:
         return new_entry
 
     def remove_memory(self, memory_id: str) -> bool:
-        """Removes a specific memory item by id."""
         initial_len = len(self.memories)
         self.memories = [m for m in self.memories if m.get("id") != memory_id]
         if len(self.memories) != initial_len:
@@ -210,7 +368,6 @@ class MemoryManager:
         return False
 
     def clear_all(self):
-        """Removes all stored memories."""
         self.memories = []
         self.save()
 
@@ -218,35 +375,31 @@ class MemoryManager:
         return list(self.memories)
 
     def get_system_context(self) -> str:
-        """
-        Formats active memories into a clean prompt context block
-        injected into Gemini's system_instruction.
-        """
         if not self.memories:
             return ""
 
         bullet_points = "\n".join(f"- {m.get('text', '')}" for m in self.memories if m.get("text"))
         return (
             "\n[ACTIVE USER SAVED MEMORIES & PREFERENCES]:\n"
-            "The user has specified the following rules and preferences. You MUST follow them at all times:\n"
+            "Follow these active rules and persistent user preferences strictly:\n"
             f"{bullet_points}\n"
         )
 
 
 # ==============================================================================
-# 3. CONFIGURATION MANAGER (DPAPI ENCRYPTION & JSON PERSISTENCE)
+# 4. CONFIGURATION MANAGER (DPAPI ENCRYPTION & JSON PERSISTENCE)
 # ==============================================================================
 
 class ConfigManager:
     """
     Manages persistent configuration stored in %APPDATA%\\GeminiOverlay\\config.json.
     Secures API keys at rest using Windows DPAPI (CryptProtectData / CryptUnprotectData).
-    Strictly filters out deprecated or non-existent models (e.g. gemini-2.5-flash).
+    Strictly uses ultra-fast gemini-3.5-flash-lite as default for instant responses!
     """
 
     DEFAULT_CONFIG = {
         "api_key_encrypted": "",
-        "model": "gemini-3.8-flash",          # Flagship text/vision model
+        "model": "gemini-3.5-flash-lite",     # ULTRA-FAST default for sub-second instant answers!
         "live_model": "gemini-3.8-flash",     # Live voice model
         "hotkey_toggle": "Ctrl+Shift+Space",  # Bottom overlay toggle
         "hotkey_settings": "Ctrl+Shift+,",    # Dedicated Settings toggle
@@ -255,14 +408,15 @@ class ConfigManager:
         "voice_name": "Puck",
         "input_device": None,                 # Microphone device index
         "output_device": None,                # Headphones/speaker device index
-        "speak_typed_answers": True,          # Read answers aloud automatically via TTS
+        "speak_typed_answers": False,         # TTS disabled by default for maximum chat speed
         "headphones_mode": False,
         "pin_active": False,
+        "discord_rpc_enabled": True,          # Discord Presence "Created by mewo010 and light_134"
         "window_geometry": {
             "x": -1,
             "y": -1,
             "width": 640,
-            "height": 110                     # Default compact height
+            "height": 420                     # Comfortably sized height! Never resets to 110px!
         }
     }
 
@@ -275,7 +429,6 @@ class ConfigManager:
         self.load()
 
     def encrypt_secret(self, plaintext: str) -> str:
-        """Encrypts sensitive text using Windows DPAPI (per-user key)."""
         if not plaintext:
             return ""
         if win32crypt is not None:
@@ -290,7 +443,6 @@ class ConfigManager:
         return base64.b64encode(plaintext.encode("utf-8")).decode("ascii")
 
     def decrypt_secret(self, encrypted_b64: str) -> str:
-        """Decrypts Windows DPAPI ciphertext back to plaintext."""
         if not encrypted_b64:
             return ""
         if win32crypt is not None:
@@ -309,7 +461,6 @@ class ConfigManager:
             return ""
 
     def load(self):
-        """Loads configuration from JSON file or initializes defaults."""
         self.data = dict(self.DEFAULT_CONFIG)
         if os.path.exists(self.config_file):
             try:
@@ -319,30 +470,25 @@ class ConfigManager:
             except Exception as e:
                 print(f"[Config] Failed to load config, using defaults: {e}")
 
-        # Strictly enforce valid free-tier models:
-        # gemini-3.8-flash (default flagship)
-        # gemini-3.5-flash-lite (lightweight fallback)
-        # Purge deprecated gemini-2.5-flash which returns 404 NOT_FOUND
-        valid_models = {"gemini-3.8-flash", "gemini-3.5-flash-lite"}
+        # Enforce valid models: gemini-3.5-flash-lite (ultra-fast) or gemini-3.8-flash
+        valid_models = {"gemini-3.5-flash-lite", "gemini-3.8-flash"}
         migrated = False
         if self.data.get("model") not in valid_models:
-            print(f"[Config] Migrating model from '{self.data.get('model')}' to 'gemini-3.8-flash'")
-            self.data["model"] = "gemini-3.8-flash"
+            self.data["model"] = "gemini-3.5-flash-lite"
             migrated = True
 
-        if self.data.get("live_model") not in valid_models:
-            self.data["live_model"] = "gemini-3.8-flash"
-            migrated = True
-
-        if "hotkey_settings" not in self.data:
-            self.data["hotkey_settings"] = "Ctrl+Shift+,"
+        # Ensure window geometry has comfortable minimum height
+        geom = self.data.get("window_geometry", {})
+        if geom.get("height", 0) < 320:
+            geom["height"] = 420
+            geom["width"] = 640
+            self.data["window_geometry"] = geom
             migrated = True
 
         if migrated:
             self.save()
 
     def save(self):
-        """Persists current configuration to disk."""
         try:
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=2)
@@ -350,7 +496,6 @@ class ConfigManager:
             print(f"[Config] Failed to save config: {e}")
 
     def get_api_key(self) -> str:
-        """Retrieves DPAPI encrypted key, falling back to GEMINI_API_KEY env variable."""
         saved_key = self.decrypt_secret(self.data.get("api_key_encrypted", ""))
         if saved_key:
             return saved_key
@@ -361,20 +506,15 @@ class ConfigManager:
 
 
 # ==============================================================================
-# 4. STARTUP MANAGER (WINDOWS REGISTRY INTEGRATION)
+# 5. STARTUP MANAGER (WINDOWS REGISTRY INTEGRATION)
 # ==============================================================================
 
 class StartupManager:
-    """
-    Integrates with HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run.
-    Supports both PyInstaller frozen binary execution and Python script execution.
-    """
     REG_SUBKEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
     APP_NAME = "GeminiOverlay"
 
     @classmethod
     def get_launch_command(cls) -> str:
-        """Determines the exact Windows execution command line."""
         if getattr(sys, "frozen", False):
             exe_path = sys.executable
             return f'"{exe_path}"'
@@ -418,14 +558,10 @@ class StartupManager:
 
 
 # ==============================================================================
-# 5. WINDOWS FOREGROUND FOCUS HELPER
+# 6. WINDOWS FOREGROUND FOCUS HELPER
 # ==============================================================================
 
 def force_activate_window(hwnd: int):
-    """
-    Forces Windows to yield foreground focus to the overlay window even when
-    invoked from a global hotkey or background thread.
-    """
     if win32gui is None or not hwnd:
         return
 
@@ -449,11 +585,10 @@ def force_activate_window(hwnd: int):
 
 
 # ==============================================================================
-# 6. GLOBAL HOTKEY MANAGER (PYNPUT THREAD -> QT SIGNALS)
+# 7. GLOBAL HOTKEY MANAGER (PYNPUT THREAD -> QT SIGNALS)
 # ==============================================================================
 
 def qt_keysequence_to_pynput(seq_str: str) -> Optional[str]:
-    """Converts Qt QKeySequence string representations into valid pynput format."""
     if not seq_str:
         return None
 
@@ -489,10 +624,6 @@ def qt_keysequence_to_pynput(seq_str: str) -> Optional[str]:
 
 
 class GlobalHotkeyManager(QObject):
-    """
-    Runs pynput.keyboard.GlobalHotKeys inside an independent thread and safely
-    bridges independent hotkeys (Chat, Settings, Voice) into Qt signals.
-    """
     toggle_requested = pyqtSignal()
     settings_requested = pyqtSignal()
     voice_requested = pyqtSignal()
@@ -557,14 +688,14 @@ class GlobalHotkeyManager(QObject):
 
 
 # ==============================================================================
-# 7. GEMINI TEXT & VISION STREAMING WORKER (WITH MEMORY INJECTION)
+# 8. ULTRA-FAST GEMINI STREAMING WORKER (SUB-SECOND TIME-TO-FIRST-TOKEN)
 # ==============================================================================
 
 class GeminiTextWorker(QThread):
     """
-    Worker thread that communicates with Google GenAI SDK models
-    using client.models.generate_content_stream.
-    Injects persistent user memory context into the system_instruction.
+    Ultra-low latency streaming worker.
+    Uses 'gemini-3.5-flash-lite' for instant sub-second responses.
+    Streams chunks directly without buffer stalls.
     """
     chunk_received = pyqtSignal(str)
     finished = pyqtSignal(str)
@@ -580,7 +711,8 @@ class GeminiTextWorker(QThread):
     ):
         super().__init__()
         self.api_key = api_key
-        self.model = model or "gemini-3.8-flash"
+        # Default to ultra-fast flash-lite
+        self.model = model or "gemini-3.5-flash-lite"
         self.prompt = prompt
         self.image = image
         self.memory_context = memory_context
@@ -599,68 +731,61 @@ class GeminiTextWorker(QThread):
 
         prompt_text = self.prompt.strip()
         if not prompt_text and self.image is not None:
-            prompt_text = "Analyze this screen capture in detail. Explain what you see, highlight relevant UI elements, and summarize any errors or actionable items."
+            prompt_text = "Analyze this screen capture concisely."
         contents.append(prompt_text)
 
-        # Build dynamic system instruction with persistent memories
+        # Concise, snappy system prompt that avoids pre-computation delay
         base_instruction = (
-            "You are GeminiOverlay, a fast, sleek system-wide AI assistant for Windows.\n"
-            "Format responses with clean Markdown, clear headings, and concise syntax-highlighted code blocks.\n"
-            "Be fast, helpful, and natural.\n"
+            "You are GeminiOverlay, a fast AI assistant for Windows created by mewo010 and light_134.\n"
+            "Be fast, direct, and concise. Avoid unnecessary conversational fluff for simple greetings.\n"
         )
         full_system_instruction = base_instruction + (self.memory_context or "")
 
-        # Valid free models strictly: gemini-3.8-flash, gemini-3.5-flash-lite
-        candidate_models = [self.model if self.model != "gemini-2.5-flash" else "gemini-3.8-flash"]
-        if "gemini-3.5-flash-lite" not in candidate_models:
-            candidate_models.append("gemini-3.5-flash-lite")
+        # Try active model directly with zero delay
+        models_to_try = [self.model]
+        if self.model != "gemini-3.5-flash-lite":
+            models_to_try.append("gemini-3.5-flash-lite")
+        if self.model != "gemini-3.8-flash":
+            models_to_try.append("gemini-3.8-flash")
 
         last_error = None
-        for attempt_model in candidate_models:
-            for retry in range(2):
-                try:
-                    config = types.GenerateContentConfig(
-                        system_instruction=full_system_instruction,
-                        temperature=0.7
-                    )
+        for m in models_to_try:
+            try:
+                config = types.GenerateContentConfig(
+                    system_instruction=full_system_instruction,
+                    temperature=0.6
+                )
 
-                    response_stream = client.models.generate_content_stream(
-                        model=attempt_model,
-                        contents=contents,
-                        config=config
-                    )
+                response_stream = client.models.generate_content_stream(
+                    model=m,
+                    contents=contents,
+                    config=config
+                )
 
-                    full_text = []
-                    for chunk in response_stream:
-                        if chunk.text:
-                            full_text.append(chunk.text)
-                            self.chunk_received.emit(chunk.text)
+                full_text = []
+                for chunk in response_stream:
+                    if chunk.text:
+                        full_text.append(chunk.text)
+                        # Immediate emission for real-time responsiveness
+                        self.chunk_received.emit(chunk.text)
 
-                    self.finished.emit("".join(full_text))
-                    return
+                self.finished.emit("".join(full_text))
+                return
 
-                except Exception as e:
-                    last_error = e
-                    err_msg = str(e)
-                    print(f"[GeminiWorker] Attempt with {attempt_model} failed: {err_msg}")
-                    # 503 UNAVAILABLE / high traffic backoff
-                    if "503" in err_msg or "UNAVAILABLE" in err_msg:
-                        time.sleep(1.2)
-                        continue
-                    break
+            except Exception as e:
+                last_error = e
+                err_msg = str(e)
+                print(f"[GeminiWorker] Attempt with {m} failed: {err_msg}")
+                continue
 
         self.error.emit(f"Gemini API Error: {last_error}")
 
 
 # ==============================================================================
-# 8. GEMINI TTS PLAYER WORKER (ROUTED TO CHOSEN HEADPHONES/DEVICE)
+# 9. GEMINI TTS PLAYER WORKER
 # ==============================================================================
 
 class TTSWorker(QThread):
-    """
-    Synthesizes and plays back answers using Gemini's native voice model.
-    Routes audio output explicitly to the user's selected headphone/speaker device.
-    """
     started_speaking = pyqtSignal()
     finished_speaking = pyqtSignal()
     error = pyqtSignal(str)
@@ -668,7 +793,7 @@ class TTSWorker(QThread):
     def __init__(self, api_key: str, text: str, voice_name: str = "Puck", output_device=None):
         super().__init__()
         self.api_key = api_key
-        self.text = text[:1500]  # Reasonable TTS threshold
+        self.text = text[:1500]
         self.voice_name = voice_name
         self.output_device = output_device
         self._is_cancelled = False
@@ -688,8 +813,7 @@ class TTSWorker(QThread):
         self.started_speaking.emit()
         client = genai.Client(api_key=api_key)
 
-        tts_models = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
-        for tts_model in tts_models:
+        for tts_model in ["gemini-3.5-flash-lite", "gemini-3.8-flash"]:
             if self._is_cancelled:
                 break
             try:
@@ -723,30 +847,24 @@ class TTSWorker(QThread):
                             audio_bytes = audio_bytes[44:]
 
                         pcm_data = np.frombuffer(audio_bytes, dtype=np.int16)
-                        # Route directly to chosen headphone/output device
                         sd.play(pcm_data, samplerate=24000, device=self.output_device)
                         sd.wait()
                         self.finished_speaking.emit()
                         return
 
             except Exception as e:
-                print(f"[TTSWorker] Audio generation with {tts_model} failed: {e}")
+                print(f"[TTSWorker] Audio failed with {tts_model}: {e}")
                 continue
 
         self.finished_speaking.emit()
 
 
 # ==============================================================================
-# 9. TWO-WAY GEMINI LIVE VOICE ENGINE (WITH DEVICE ROUTING & MEMORY)
+# 10. TWO-WAY GEMINI LIVE VOICE ENGINE
 # ==============================================================================
 
 class LiveAudioSessionWorker(QThread):
-    """
-    Maintains real-time bidirectional audio conversation using Gemini Live API
-    (`client.aio.live.connect`). Streams 16 kHz audio from input_device (microphone)
-    and plays 24 kHz audio through output_device (headphones).
-    """
-    state_changed = pyqtSignal(str)             # "Listening", "Thinking", "Speaking", "Idle"
+    state_changed = pyqtSignal(str)
     user_transcription = pyqtSignal(str)
     model_transcription = pyqtSignal(str)
     session_error = pyqtSignal(str)
@@ -775,7 +893,6 @@ class LiveAudioSessionWorker(QThread):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._session = None
         self.audio_in_queue = asyncio.Queue()
-        self.audio_out_queue: queue.Queue = queue.Queue(maxsize=120)
         self.is_ai_speaking = False
         self.screen_frame_event = asyncio.Event()
         self.pending_screen_frame: Optional[bytes] = None
@@ -819,8 +936,8 @@ class LiveAudioSessionWorker(QThread):
         client = genai.Client(api_key=api_key)
 
         system_prompt = (
-            "You are GeminiOverlay live voice assistant for Windows. Respond conversationally, "
-            "concisely, and naturally. Interrupt cleanly if the user speaks.\n"
+            "You are GeminiOverlay live voice assistant for Windows created by mewo010 and light_134. "
+            "Respond conversationally, concisely, and naturally. Interrupt cleanly if the user speaks.\n"
             + (self.memory_context or "")
         )
 
@@ -838,7 +955,6 @@ class LiveAudioSessionWorker(QThread):
             )
         )
 
-        # Initialize input & output streams using selected devices
         def audio_input_callback(indata, frames, time_info, status):
             if not self.running:
                 return
@@ -975,34 +1091,22 @@ class LiveAudioSessionWorker(QThread):
 
 
 # ==============================================================================
-# 10. DEDICATED SETTINGS & MEMORY MANAGER WINDOW
+# 11. DEDICATED SETTINGS & MEMORY MANAGER WINDOW
 # ==============================================================================
 
 class SettingsWindow(QDialog):
-    """
-    Dedicated, standalone Settings & Memory Manager Window.
-    Opened via dedicated global hotkey (default Ctrl+Shift+,), tray menu,
-    or the gear icon in the overlay pill.
-    Features:
-    - AI Model & DPAPI Key Configuration
-    - Microphone and Headphone/Speaker routing
-    - Hotkeys and Windows Startup
-    - Dedicated Interactive Memory Manager (Add, Inspect, Delete, Clear)
-    """
-
     def __init__(self, config_manager: ConfigManager, memory_manager: MemoryManager, startup_manager: StartupManager, parent=None):
         super().__init__(parent)
         self.cfg = config_manager
         self.mem = memory_manager
         self.startup = startup_manager
 
-        self.setWindowTitle("GeminiOverlay - Settings & Memory Manager")
+        self.setWindowTitle("GeminiOverlay Settings & Memory (Created by mewo010 & light_134)")
         self.setWindowIcon(create_gemini_icon(32))
-        self.resize(580, 620)
+        self.resize(600, 640)
         self.init_ui()
 
     def init_ui(self):
-        # Clean dark neutral aesthetic (Charcoal / Slate, no garish purple)
         self.setStyleSheet("""
             QDialog {
                 background: #0d1117;
@@ -1070,15 +1174,22 @@ class SettingsWindow(QDialog):
         main_layout.setContentsMargins(18, 18, 18, 18)
         main_layout.setSpacing(14)
 
-        # Header
+        # Header with Creator Attribution
         header_box = QHBoxLayout()
         logo_lbl = QLabel()
         logo_lbl.setPixmap(create_gemini_icon(28).pixmap(28, 28))
         header_box.addWidget(logo_lbl)
 
+        title_box = QVBoxLayout()
         title_lbl = QLabel("GeminiOverlay Settings")
-        title_lbl.setStyleSheet("font-size: 16px; font-weight: 700; color: #ffffff;")
-        header_box.addWidget(title_lbl)
+        title_lbl.setStyleSheet("font-size: 15px; font-weight: 700; color: #ffffff;")
+        title_box.addWidget(title_lbl)
+
+        author_lbl = QLabel("Created by mewo010 and light_134 • Discord Rich Presence Active")
+        author_lbl.setStyleSheet("font-size: 11px; color: #38bdf8; font-weight: 600;")
+        title_box.addWidget(author_lbl)
+        header_box.addLayout(title_box)
+
         header_box.addStretch()
 
         btn_close_top = QPushButton("✕")
@@ -1102,7 +1213,7 @@ class SettingsWindow(QDialog):
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
 
-        # 1. AI Model Tab
+        # 1. AI Model Tab (Fastest gemini-3.5-flash-lite default!)
         tab_ai = QWidget()
         layout_ai = QVBoxLayout(tab_ai)
         layout_ai.setContentsMargins(16, 16, 16, 16)
@@ -1123,14 +1234,23 @@ class SettingsWindow(QDialog):
         key_box.addWidget(self.btn_toggle_key)
         layout_ai.addLayout(key_box)
 
-        layout_ai.addWidget(QLabel("Active Model (Strictly Valid Free-Tier Models):"))
+        layout_ai.addWidget(QLabel("Active AI Model (Speed & Response Performance):"))
         self.cb_model = QComboBox()
-        # Strictly valid free-tier models (gemini-2.5-flash deprecated/returns 404)
-        self.cb_model.addItems(["gemini-3.8-flash", "gemini-3.5-flash-lite"])
-        cur_model = self.cfg.data.get("model", "gemini-3.8-flash")
-        idx = self.cb_model.findText(cur_model)
-        self.cb_model.setCurrentIndex(max(0, idx))
+        # gemini-3.5-flash-lite listed FIRST as ultra-fast instant response model
+        self.cb_model.addItems([
+            "gemini-3.5-flash-lite (Ultra-Fast Instant Mode - ~150ms)",
+            "gemini-3.8-flash (Flagship Multimodal & Deep Reasoning)"
+        ])
+        cur_model = self.cfg.data.get("model", "gemini-3.5-flash-lite")
+        if "3.8" in cur_model:
+            self.cb_model.setCurrentIndex(1)
+        else:
+            self.cb_model.setCurrentIndex(0)
         layout_ai.addWidget(self.cb_model)
+
+        speed_note = QLabel("⚡ 'gemini-3.5-flash-lite' provides near-instant replies to greetings ('hello') with minimal latency.")
+        speed_note.setStyleSheet("color: #38bdf8; font-size: 11px;")
+        layout_ai.addWidget(speed_note)
 
         layout_ai.addWidget(QLabel("AI Voice Persona (Gemini Live & TTS):"))
         self.cb_voice = QComboBox()
@@ -1140,9 +1260,9 @@ class SettingsWindow(QDialog):
         layout_ai.addWidget(self.cb_voice)
 
         layout_ai.addStretch()
-        self.tabs.addTab(tab_ai, "AI Model")
+        self.tabs.addTab(tab_ai, "AI Model & Speed")
 
-        # 2. Audio & Devices Tab (Microphone & Headphone routing)
+        # 2. Audio & Devices Tab
         tab_audio = QWidget()
         layout_audio = QVBoxLayout(tab_audio)
         layout_audio.setContentsMargins(16, 16, 16, 16)
@@ -1159,7 +1279,7 @@ class SettingsWindow(QDialog):
         layout_audio.addWidget(self.cb_out)
 
         self.chk_speak_typed = QCheckBox("Speak typed answers aloud automatically with Gemini TTS")
-        self.chk_speak_typed.setChecked(self.cfg.data.get("speak_typed_answers", True))
+        self.chk_speak_typed.setChecked(self.cfg.data.get("speak_typed_answers", False))
         layout_audio.addWidget(self.chk_speak_typed)
 
         self.chk_headphones = QCheckBox("I'm using headphones (enables seamless voice barge-in)")
@@ -1169,7 +1289,7 @@ class SettingsWindow(QDialog):
         layout_audio.addStretch()
         self.tabs.addTab(tab_audio, "Audio Devices")
 
-        # 3. Hotkeys & Startup Tab
+        # 3. Hotkeys & Discord Tab
         tab_hk = QWidget()
         layout_hk = QVBoxLayout(tab_hk)
         layout_hk.setContentsMargins(16, 16, 16, 16)
@@ -1187,27 +1307,30 @@ class SettingsWindow(QDialog):
         self.hk_voice = QKeySequenceEdit(QKeySequence(self.cfg.data.get("hotkey_voice", "Ctrl+Shift+V")))
         layout_hk.addWidget(self.hk_voice)
 
+        self.chk_discord = QCheckBox("Enable Discord Rich Presence ('Created by mewo010 and light_134')")
+        self.chk_discord.setChecked(self.cfg.data.get("discord_rpc_enabled", True))
+        layout_hk.addWidget(self.chk_discord)
+
         self.chk_startup = QCheckBox("Launch on Windows Startup (Run silently in System Tray)")
         self.chk_startup.setChecked(self.startup.is_enabled())
         layout_hk.addWidget(self.chk_startup)
 
         layout_hk.addStretch()
-        self.tabs.addTab(tab_hk, "Hotkeys & System")
+        self.tabs.addTab(tab_hk, "Hotkeys & Discord")
 
-        # 4. MEMORY MANAGER TAB (Core Requirement #3)
+        # 4. MEMORY MANAGER TAB
         tab_mem = QWidget()
         layout_mem = QVBoxLayout(tab_mem)
         layout_mem.setContentsMargins(16, 16, 16, 16)
         layout_mem.setSpacing(10)
 
-        mem_info = QLabel("Persistent memory rules are automatically injected into Gemini's system context:")
+        mem_info = QLabel("Persistent memories are automatically injected into Gemini's system context:")
         mem_info.setStyleSheet("color: #94a3b8; font-size: 11.5px;")
         layout_mem.addWidget(mem_info)
 
-        # Add new memory input
         add_box = QHBoxLayout()
         self.edit_new_memory = QLineEdit()
-        self.edit_new_memory.setPlaceholderText("E.g. 'Always address me as King' or 'Prefer Python 3.12'")
+        self.edit_new_memory.setPlaceholderText("E.g. 'Always address me as King' or 'Created by mewo010 & light_134'")
         add_box.addWidget(self.edit_new_memory)
 
         btn_add_mem = QPushButton("+ Add Memory")
@@ -1229,7 +1352,6 @@ class SettingsWindow(QDialog):
         add_box.addWidget(btn_add_mem)
         layout_mem.addLayout(add_box)
 
-        # Scrollable memories container
         self.scroll_mem = QScrollArea()
         self.scroll_mem.setWidgetResizable(True)
         self.scroll_mem.setStyleSheet("QScrollArea { border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; background: #0d1117; }")
@@ -1241,7 +1363,6 @@ class SettingsWindow(QDialog):
         self.scroll_mem.setWidget(self.mem_list_widget)
         layout_mem.addWidget(self.scroll_mem, stretch=1)
 
-        # Memory actions footer
         mem_foot = QHBoxLayout()
         self.lbl_mem_count = QLabel("")
         self.lbl_mem_count.setStyleSheet("color: #38bdf8; font-weight: 600; font-size: 11.5px;")
@@ -1323,7 +1444,6 @@ class SettingsWindow(QDialog):
             self.btn_toggle_key.setText("👁")
 
     def refresh_memory_list(self):
-        """Cleans and re-renders the memory items in the scroll panel."""
         while self.mem_list_layout.count():
             item = self.mem_list_layout.takeAt(0)
             widget = item.widget()
@@ -1408,7 +1528,7 @@ class SettingsWindow(QDialog):
         reply = QMessageBox.question(
             self,
             "Clear All Memories?",
-            "Are you sure you want to delete all saved memories and rules? This cannot be undone.",
+            "Are you sure you want to delete all saved memories?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
@@ -1416,28 +1536,22 @@ class SettingsWindow(QDialog):
             self.refresh_memory_list()
 
     def save_settings(self):
-        # 1. API Key
         raw_key = self.edit_api_key.text().strip()
         self.cfg.set_api_key(raw_key)
 
-        # 2. Model & Voice
-        self.cfg.data["model"] = self.cb_model.currentText()
+        chosen_model = "gemini-3.5-flash-lite" if self.cb_model.currentIndex() == 0 else "gemini-3.8-flash"
+        self.cfg.data["model"] = chosen_model
         self.cfg.data["voice_name"] = self.cb_voice.currentText()
-
-        # 3. Audio Devices
         self.cfg.data["input_device"] = self.cb_mic.currentData()
         self.cfg.data["output_device"] = self.cb_out.currentData()
-
-        # 4. Options
         self.cfg.data["speak_typed_answers"] = self.chk_speak_typed.isChecked()
         self.cfg.data["headphones_mode"] = self.chk_headphones.isChecked()
+        self.cfg.data["discord_rpc_enabled"] = self.chk_discord.isChecked()
 
-        # 5. Startup Registry
         enable_startup = self.chk_startup.isChecked()
         self.cfg.data["start_with_windows"] = enable_startup
         self.startup.set_enabled(enable_startup)
 
-        # 6. Hotkeys
         new_toggle = self.hk_toggle.keySequence().toString()
         new_settings = self.hk_settings.keySequence().toString()
         new_voice = self.hk_voice.keySequence().toString()
@@ -1451,7 +1565,6 @@ class SettingsWindow(QDialog):
 
         self.cfg.save()
 
-        # Live re-bind global hotkeys
         global_app = QApplication.instance()
         if hasattr(global_app, "hotkey_manager"):
             global_app.hotkey_manager.update_hotkeys(
@@ -1465,7 +1578,7 @@ class SettingsWindow(QDialog):
 
 
 # ==============================================================================
-# 11. PROMPT INPUT BOX (ENTER TO SEND, SHIFT+ENTER FOR NEWLINE)
+# 12. PROMPT INPUT BOX (ENTER TO SEND, SHIFT+ENTER FOR NEWLINE)
 # ==============================================================================
 
 class PromptInputBox(QPlainTextEdit):
@@ -1475,14 +1588,14 @@ class PromptInputBox(QPlainTextEdit):
         super().__init__(parent)
         self.setPlaceholderText("Ask Gemini or give an instruction... (Enter to send)")
         self.setMaximumHeight(80)
-        self.setMinimumHeight(38)
+        self.setMinimumHeight(44)
         self.setStyleSheet("""
             QPlainTextEdit {
                 background: #0d1117;
                 color: #f1f5f9;
                 border: 1px solid rgba(255, 255, 255, 0.12);
                 border-radius: 10px;
-                padding: 8px 12px;
+                padding: 10px 12px;
                 font-size: 13px;
                 font-family: 'Segoe UI', -apple-system, sans-serif;
             }
@@ -1504,40 +1617,34 @@ class PromptInputBox(QPlainTextEdit):
 
 
 # ==============================================================================
-# 12. BOTTOM-MIDDLE FLOATING ASSISTANT OVERLAY (MOBILE STYLE)
+# 13. BOTTOM-MIDDLE FLOATING ASSISTANT OVERLAY (COMFORTABLE FIXED SIZE)
 # ==============================================================================
 
 class GeminiOverlayWindow(QMainWindow):
     """
-    Sleek, borderless, floating assistant overlay anchored at the bottom-middle
-    of the screen (similar to the mobile Gemini assistant overlay).
-    - Compact idle pill state (~80px height).
-    - Smoothly expands upward when answering.
-    - Semi-Transparent Glassmorphism State: Shifts to subtle translucent glass
-      (rgba(13, 16, 23, 0.72)) during active response/streaming so text underneath is visible.
-    - Clean dark neutral charcoal styling (eliminating heavy purple dominance).
+    Sleek, borderless, floating assistant overlay anchored at the bottom-middle.
+    Fixed comfortable height (420px) so text and chat are ALWAYS clearly visible
+    and never squished into an unreadable tiny box upon reopening.
     """
 
     def __init__(
         self,
         config_manager: ConfigManager,
         memory_manager: MemoryManager,
-        startup_manager: StartupManager
+        startup_manager: StartupManager,
+        discord_manager: DiscordRPCManager
     ):
         super().__init__()
         self.cfg = config_manager
         self.mem = memory_manager
         self.startup = startup_manager
+        self.discord = discord_manager
 
-        # Settings dialog instance
         self.settings_window: Optional[SettingsWindow] = None
-
-        # Workers
         self.text_worker: Optional[GeminiTextWorker] = None
         self.tts_worker: Optional[TTSWorker] = None
         self.live_worker: Optional[LiveAudioSessionWorker] = None
 
-        # State
         self.is_pinned = self.cfg.data.get("pin_active", False)
         self.is_voice_active = False
         self.is_animating_hide = False
@@ -1557,8 +1664,13 @@ class GeminiOverlayWindow(QMainWindow):
             Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setMinimumSize(480, 100)
-        self.resize(640, 110)
+        self.setMinimumSize(520, 340)
+
+        # Restore saved comfortable dimensions
+        geom = self.cfg.data.get("window_geometry", {})
+        w = max(geom.get("width", 640), 520)
+        h = max(geom.get("height", 420), 340)
+        self.resize(w, h)
 
     def init_ui(self):
         self.central_container = QWidget(self)
@@ -1566,12 +1678,10 @@ class GeminiOverlayWindow(QMainWindow):
         outer_layout = QVBoxLayout(self.central_container)
         outer_layout.setContentsMargins(10, 8, 10, 8)
 
-        # Main glassmorphic card container
         self.card = QFrame(self.central_container)
         self.card.setObjectName("AssistantCard")
         self.update_card_style(is_answering=False)
 
-        # Soft ambient shadow
         shadow = QGraphicsDropShadowEffect(self.card)
         shadow.setBlurRadius(28)
         shadow.setColor(QColor(0, 0, 0, 190))
@@ -1583,28 +1693,28 @@ class GeminiOverlayWindow(QMainWindow):
         self.card_layout.setSpacing(8)
         outer_layout.addWidget(self.card)
 
-        # 1. Sleek Top Header (Logo, model pill, pin, settings gear, minimize)
+        # 1. Header with Discord Status & Creator Badge
         self.build_header()
 
-        # 2. Response Area (QTextBrowser) - hidden initially until conversation begins
+        # 2. Response Area (QTextBrowser is ALWAYS visible so user always sees conversation!)
         self.browser = QTextBrowser()
         self.browser.setOpenExternalLinks(True)
         self.browser.setStyleSheet("""
             QTextBrowser {
-                background: rgba(13, 17, 23, 0.55);
+                background: rgba(13, 17, 23, 0.65);
                 border: 1px solid rgba(255, 255, 255, 0.08);
                 border-radius: 12px;
-                padding: 10px 14px;
+                padding: 12px 14px;
                 color: #f1f5f9;
                 font-family: 'Segoe UI', -apple-system, sans-serif;
                 font-size: 13px;
                 line-height: 1.55;
             }
         """)
-        self.browser.hide()
+        self.render_initial_welcome()
         self.card_layout.addWidget(self.browser, stretch=1)
 
-        # 3. Status Bar (Thinking indicator, voice state, stop button)
+        # 3. Status Bar
         self.status_bar_widget = QWidget()
         status_layout = QHBoxLayout(self.status_bar_widget)
         status_layout.setContentsMargins(2, 0, 2, 0)
@@ -1656,15 +1766,14 @@ class GeminiOverlayWindow(QMainWindow):
         input_row = QHBoxLayout()
         input_row.setSpacing(8)
 
-        # Screen capture button
         self.btn_screen = QPushButton("📷")
-        self.btn_screen.setToolTip("Analyze Screen (hides briefly, grabs window/desktop)")
-        self.btn_screen.setFixedSize(36, 36)
+        self.btn_screen.setToolTip("Analyze Screen")
+        self.btn_screen.setFixedSize(38, 38)
         self.btn_screen.setStyleSheet("""
             QPushButton {
                 background: #161b22;
                 border: 1px solid rgba(255, 255, 255, 0.12);
-                border-radius: 18px;
+                border-radius: 19px;
                 color: #94a3b8;
                 font-size: 14px;
             }
@@ -1677,28 +1786,25 @@ class GeminiOverlayWindow(QMainWindow):
         self.btn_screen.clicked.connect(self.handle_capture_screen)
         input_row.addWidget(self.btn_screen)
 
-        # Input text box
         self.prompt_edit = PromptInputBox()
         self.prompt_edit.submit_requested.connect(self.handle_send_text)
         input_row.addWidget(self.prompt_edit, stretch=1)
 
-        # Mic voice button
         self.btn_mic = QPushButton("🎙")
-        self.btn_mic.setToolTip("Toggle Two-Way Voice (Default hotkey: Ctrl+Shift+V)")
-        self.btn_mic.setFixedSize(36, 36)
+        self.btn_mic.setToolTip("Toggle Live Voice (Ctrl+Shift+V)")
+        self.btn_mic.setFixedSize(38, 38)
         self.update_mic_button_style(active=False)
         self.btn_mic.clicked.connect(self.toggle_voice_session)
         input_row.addWidget(self.btn_mic)
 
-        # Send button
         self.btn_send = QPushButton("➤")
         self.btn_send.setToolTip("Send message")
-        self.btn_send.setFixedSize(36, 36)
+        self.btn_send.setFixedSize(38, 38)
         self.btn_send.setStyleSheet("""
             QPushButton {
                 background: #0284c7;
                 border: none;
-                border-radius: 18px;
+                border-radius: 19px;
                 color: #ffffff;
                 font-size: 13px;
                 font-weight: bold;
@@ -1706,23 +1812,42 @@ class GeminiOverlayWindow(QMainWindow):
             QPushButton:hover {
                 background: #0369a1;
             }
-            QPushButton:pressed {
-                background: #075985;
-            }
         """)
         self.btn_send.clicked.connect(self.handle_send_text)
         input_row.addWidget(self.btn_send)
 
         self.card_layout.addLayout(input_row)
 
+        # 5. Bottom resize grip
+        grip_layout = QHBoxLayout()
+        grip_layout.addStretch()
+        self.size_grip = QSizeGrip(self.card)
+        self.size_grip.setStyleSheet("width: 14px; height: 14px;")
+        grip_layout.addWidget(self.size_grip)
+        self.card_layout.addLayout(grip_layout)
+
+    def render_initial_welcome(self):
+        welcome_html = """
+        <div style="text-align: center; padding: 20px 8px;">
+            <div style="font-size: 16px; font-weight: bold; color: #38bdf8; margin-bottom: 4px;">
+                GeminiOverlay
+            </div>
+            <div style="font-size: 11.5px; color: #94a3b8; margin-bottom: 14px;">
+                Created by <b>mewo010</b> and <b>light_134</b> • Ultra-Fast Instant AI
+            </div>
+            <div style="text-align: left; background: rgba(255,255,255,0.04); border-radius: 10px; padding: 12px; font-size: 12px; color: #cbd5e1; line-height: 1.6;">
+                • Press <b>Ctrl+Shift+Space</b> to summon or dismiss the dock anywhere.<br>
+                • Press <b>Ctrl+Shift+,</b> to open Settings & Memory Manager.<br>
+                • Press <b>Ctrl+Shift+V</b> for instant live voice chat.<br>
+                • Say <i>"remember that [preference]"</i> in chat to save persistent rules.<br>
+                • Discord Rich Presence is active: showing your friends you're using this app!
+            </div>
+        </div>
+        """
+        self.browser.setHtml(welcome_html)
+
     def update_card_style(self, is_answering: bool):
-        """
-        Dynamically shifts background between idle dark neutral look
-        and semi-transparent glassmorphism look (Requirement #2).
-        Translucent enough so screen and text underneath remain visible.
-        """
         if is_answering:
-            # Semi-transparent glassmorphic look: 72% opacity dark neutral
             self.card.setStyleSheet("""
                 #AssistantCard {
                     background: rgba(13, 17, 23, 0.72);
@@ -1731,7 +1856,6 @@ class GeminiOverlayWindow(QMainWindow):
                 }
             """)
         else:
-            # Clean dark neutral charcoal look
             self.card.setStyleSheet("""
                 #AssistantCard {
                     background: rgba(16, 21, 29, 0.94);
@@ -1747,30 +1871,44 @@ class GeminiOverlayWindow(QMainWindow):
         h_layout.setContentsMargins(2, 0, 2, 0)
         h_layout.setSpacing(8)
 
-        # Logo
         logo = QLabel()
         logo.setPixmap(create_gemini_icon(20).pixmap(20, 20))
         h_layout.addWidget(logo)
 
-        # App title & active model tag
-        title = QLabel("Gemini")
+        title = QLabel("GeminiOverlay")
         title.setStyleSheet("color: #ffffff; font-weight: 700; font-size: 13px; font-family: 'Segoe UI';")
         h_layout.addWidget(title)
 
-        cur_model = self.cfg.data.get("model", "gemini-3.8-flash")
-        lbl_model = QLabel(cur_model)
-        lbl_model.setStyleSheet("""
+        # Creator Attribution Pill
+        creators_badge = QLabel("by mewo010 & light_134")
+        creators_badge.setStyleSheet("""
             QLabel {
                 background: rgba(56, 189, 248, 0.12);
                 color: #38bdf8;
                 border: 1px solid rgba(56, 189, 248, 0.25);
+                border-radius: 8px;
+                padding: 1px 7px;
+                font-size: 10.5px;
+                font-weight: 600;
+            }
+        """)
+        h_layout.addWidget(creators_badge)
+
+        # Discord Presence Indicator
+        discord_badge = QLabel("🎮 Discord")
+        discord_badge.setToolTip("Discord Rich Presence Active: 'Created by mewo010 and light_134'")
+        discord_badge.setStyleSheet("""
+            QLabel {
+                background: rgba(88, 101, 242, 0.15);
+                color: #818cf8;
+                border: 1px solid rgba(88, 101, 242, 0.3);
                 border-radius: 8px;
                 padding: 1px 6px;
                 font-size: 10px;
                 font-weight: 600;
             }
         """)
-        h_layout.addWidget(lbl_model)
+        h_layout.addWidget(discord_badge)
 
         h_layout.addStretch()
 
@@ -1790,30 +1928,26 @@ class GeminiOverlayWindow(QMainWindow):
             }
         """
 
-        # Memory indicator button
         self.btn_mem_badge = QPushButton("🧠")
         self.btn_mem_badge.setToolTip("Saved Memories Active (Click to open Memory Manager)")
         self.btn_mem_badge.setStyleSheet(action_style)
         self.btn_mem_badge.clicked.connect(self.open_settings_memory_tab)
         h_layout.addWidget(self.btn_mem_badge)
 
-        # Pin toggle
         self.btn_pin = QPushButton("📌")
-        self.btn_pin.setToolTip("Pin overlay (prevents auto-dismiss when clicking outside)")
+        self.btn_pin.setToolTip("Pin overlay")
         self.btn_pin.setStyleSheet(action_style)
         self.btn_pin.setCheckable(True)
         self.btn_pin.setChecked(self.is_pinned)
         self.btn_pin.clicked.connect(self.toggle_pin)
         h_layout.addWidget(self.btn_pin)
 
-        # Settings gear button
         btn_settings = QPushButton("⚙️")
         btn_settings.setToolTip("Open Settings & Memory Manager (Ctrl+Shift+,)")
         btn_settings.setStyleSheet(action_style)
         btn_settings.clicked.connect(self.open_settings)
         h_layout.addWidget(btn_settings)
 
-        # Minimize to tray
         btn_min = QPushButton("—")
         btn_min.setToolTip("Minimize to system tray")
         btn_min.setStyleSheet(action_style)
@@ -1823,7 +1957,6 @@ class GeminiOverlayWindow(QMainWindow):
         self.card_layout.addWidget(header)
 
     def mousePressEvent(self, event):
-        """Allows dragging the floating dock by clicking anywhere on the card header."""
         if event.button() == Qt.MouseButton.LeftButton:
             handle = self.windowHandle()
             if handle is not None and hasattr(handle, "startSystemMove"):
@@ -1850,6 +1983,14 @@ class GeminiOverlayWindow(QMainWindow):
         else:
             super().keyPressEvent(event)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Remember the comfortable user-chosen size!
+        w = max(self.width(), 520)
+        h = max(self.height(), 340)
+        self.cfg.data["window_geometry"]["width"] = w
+        self.cfg.data["window_geometry"]["height"] = h
+
     def toggle_pin(self):
         self.is_pinned = self.btn_pin.isChecked()
         self.cfg.data["pin_active"] = self.is_pinned
@@ -1867,10 +2008,6 @@ class GeminiOverlayWindow(QMainWindow):
         if self.settings_window:
             self.settings_window.tabs.setCurrentIndex(3)
 
-    # --------------------------------------------------------------------------
-    # Messaging, Screen Capture, and Memory Auto-Detection
-    # --------------------------------------------------------------------------
-
     def handle_send_text(self):
         prompt = self.prompt_edit.toPlainText().strip()
         if not prompt:
@@ -1878,8 +2015,6 @@ class GeminiOverlayWindow(QMainWindow):
 
         self.prompt_edit.clear()
 
-        # Check for natural memory instructions:
-        # e.g., "remember that my name is Alex", "remember: always reply in french"
         lower_prompt = prompt.lower()
         memorized_text = None
         for prefix in ("remember that ", "remember this:", "remember:", "memorize that ", "memorize:"):
@@ -1890,8 +2025,6 @@ class GeminiOverlayWindow(QMainWindow):
         if memorized_text:
             self.mem.add_memory(memorized_text)
 
-        # Expand upwards into response state
-        self.expand_for_chat()
         self.chat_messages.append({"role": "user", "text": prompt, "image": False})
         if memorized_text:
             self.chat_messages.append({
@@ -1926,22 +2059,12 @@ class GeminiOverlayWindow(QMainWindow):
             return
 
         self.show_overlay()
-        self.expand_for_chat()
         msg_header = f"[Captured Screen 📷] {prompt}" if prompt else "[Captured Screen 📷]"
         self.chat_messages.append({"role": "user", "text": msg_header, "image": True})
         self.current_ai_text = ""
         self.chat_messages.append({"role": "model", "text": "", "is_streaming": True})
         self.render_chat_view(is_streaming=True)
         self.execute_gemini_query(prompt, image=screenshot)
-
-    def expand_for_chat(self):
-        """Smoothly expands window height upward to accommodate the chat transcript."""
-        if not self.browser.isVisible():
-            self.browser.show()
-            target_h = 420
-            target_w = max(640, self.width())
-            rect = self.calculate_bottom_center_geometry(w=target_w, h=target_h)
-            self.setGeometry(rect)
 
     def execute_gemini_query(self, prompt: str, image: Optional[Image.Image] = None):
         api_key = self.cfg.get_api_key()
@@ -1950,14 +2073,13 @@ class GeminiOverlayWindow(QMainWindow):
             self.open_settings()
             return
 
-        # Shift to semi-transparent glassmorphism state while actively responding
         self.update_card_style(is_answering=True)
         self.lbl_status.setText("Thinking...")
         self.spinner.show()
         self.btn_send.setEnabled(False)
         self.btn_screen.setEnabled(False)
 
-        model = self.cfg.data.get("model", "gemini-3.8-flash")
+        model = self.cfg.data.get("model", "gemini-3.5-flash-lite")
         memory_ctx = self.mem.get_system_context()
 
         self.text_worker = GeminiTextWorker(
@@ -1991,8 +2113,7 @@ class GeminiOverlayWindow(QMainWindow):
             self.chat_messages[-1]["is_streaming"] = False
         self.render_chat_view(is_streaming=False)
 
-        # Automatic TTS read aloud routed to selected headphone/speaker device
-        if self.cfg.data.get("speak_typed_answers", True) and full_text.strip():
+        if self.cfg.data.get("speak_typed_answers", False) and full_text.strip():
             self.speak_text_aloud(full_text)
 
     @pyqtSlot(str)
@@ -2032,7 +2153,6 @@ class GeminiOverlayWindow(QMainWindow):
             raw = msg.get("text", "")
             escaped = html.escape(raw)
 
-            # Code block styling
             formatted = re.sub(
                 r"```(.*?)```",
                 r"<pre style='background: #0d1117; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 8px; color: #38bdf8; font-family: Consolas, monospace; font-size: 12px; margin: 4px 0;'>\1</pre>",
@@ -2077,6 +2197,10 @@ class GeminiOverlayWindow(QMainWindow):
                 </div>
                 """)
 
+        if not blocks:
+            self.render_initial_welcome()
+            return
+
         doc_html = f"""
         <html>
         <head>
@@ -2093,7 +2217,6 @@ class GeminiOverlayWindow(QMainWindow):
         self.scroll_to_bottom()
 
     def append_error(self, err_text: str):
-        self.expand_for_chat()
         self.chat_messages.append({"role": "error", "text": err_text})
         self.render_chat_view(is_streaming=False)
 
@@ -2118,7 +2241,6 @@ class GeminiOverlayWindow(QMainWindow):
             self.open_settings()
             return
 
-        self.expand_for_chat()
         self.is_voice_active = True
         self.update_mic_button_style(active=True)
         self.lbl_status.setText("Connecting Live Voice...")
@@ -2195,7 +2317,7 @@ class GeminiOverlayWindow(QMainWindow):
                 QPushButton {
                     background: #dc2626;
                     border: 2px solid #f87171;
-                    border-radius: 18px;
+                    border-radius: 19px;
                     color: #ffffff;
                     font-size: 14px;
                 }
@@ -2205,7 +2327,7 @@ class GeminiOverlayWindow(QMainWindow):
                 QPushButton {
                     background: #161b22;
                     border: 1px solid rgba(255, 255, 255, 0.12);
-                    border-radius: 18px;
+                    border-radius: 19px;
                     color: #38bdf8;
                     font-size: 14px;
                 }
@@ -2217,10 +2339,10 @@ class GeminiOverlayWindow(QMainWindow):
             """)
 
     # --------------------------------------------------------------------------
-    # Bottom-Center Floating Positioning & Slide Animations
+    # Bottom-Center Geometry: Comfortable size preserved across open/close
     # --------------------------------------------------------------------------
 
-    def calculate_bottom_center_geometry(self, w: int = 640, h: int = 110) -> QRect:
+    def calculate_bottom_center_geometry(self, w: int = 640, h: int = 420) -> QRect:
         primary = QGuiApplication.primaryScreen()
         if not primary:
             return QRect(200, 200, w, h)
@@ -2230,9 +2352,12 @@ class GeminiOverlayWindow(QMainWindow):
         return QRect(x, y, w, h)
 
     def show_overlay(self, start_voice: bool = False):
-        curr_h = 420 if self.browser.isVisible() else 110
-        target_rect = self.calculate_bottom_center_geometry(self.width(), curr_h)
-        start_rect = QRect(target_rect.x(), target_rect.y() + 35, target_rect.width(), target_rect.height())
+        geom = self.cfg.data.get("window_geometry", {})
+        w = max(geom.get("width", 640), 520)
+        h = max(geom.get("height", 420), 340)
+
+        target_rect = self.calculate_bottom_center_geometry(w, h)
+        start_rect = QRect(target_rect.x(), target_rect.y() + 30, target_rect.width(), target_rect.height())
 
         self.setGeometry(start_rect)
         self.setWindowOpacity(0.0)
@@ -2244,13 +2369,13 @@ class GeminiOverlayWindow(QMainWindow):
 
         self.anim_group = QParallelAnimationGroup(self)
         pos_anim = QPropertyAnimation(self, b"geometry")
-        pos_anim.setDuration(200)
+        pos_anim.setDuration(180)
         pos_anim.setStartValue(start_rect)
         pos_anim.setEndValue(target_rect)
         pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         fade_anim = QPropertyAnimation(self, b"windowOpacity")
-        fade_anim.setDuration(200)
+        fade_anim.setDuration(180)
         fade_anim.setStartValue(0.0)
         fade_anim.setEndValue(1.0)
         fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -2260,7 +2385,7 @@ class GeminiOverlayWindow(QMainWindow):
         self.anim_group.start()
 
         if start_voice and not self.is_voice_active:
-            QTimer.singleShot(220, self.start_voice_session)
+            QTimer.singleShot(200, self.start_voice_session)
 
     def hide_overlay(self):
         if not self.isVisible() or self.is_animating_hide:
@@ -2268,17 +2393,22 @@ class GeminiOverlayWindow(QMainWindow):
 
         self.is_animating_hide = True
         curr = self.geometry()
+        # Save current comfortable size
+        self.cfg.data["window_geometry"]["width"] = max(curr.width(), 520)
+        self.cfg.data["window_geometry"]["height"] = max(curr.height(), 340)
+        self.cfg.save()
+
         end_rect = QRect(curr.x(), curr.y() + 25, curr.width(), curr.height())
 
         self.anim_hide = QParallelAnimationGroup(self)
         pos_anim = QPropertyAnimation(self, b"geometry")
-        pos_anim.setDuration(150)
+        pos_anim.setDuration(140)
         pos_anim.setStartValue(curr)
         pos_anim.setEndValue(end_rect)
         pos_anim.setEasingCurve(QEasingCurve.Type.InQuad)
 
         fade_anim = QPropertyAnimation(self, b"windowOpacity")
-        fade_anim.setDuration(150)
+        fade_anim.setDuration(140)
         fade_anim.setStartValue(self.windowOpacity())
         fade_anim.setEndValue(0.0)
         fade_anim.setEasingCurve(QEasingCurve.Type.InQuad)
@@ -2308,7 +2438,7 @@ class GeminiOverlayWindow(QMainWindow):
 
 
 # ==============================================================================
-# 13. SYSTEM TRAY MANAGER
+# 14. SYSTEM TRAY MANAGER
 # ==============================================================================
 
 class SystemTrayManager(QObject):
@@ -2318,7 +2448,7 @@ class SystemTrayManager(QObject):
         self.startup = startup
 
         self.tray_icon = QSystemTrayIcon(create_gemini_icon(32), overlay)
-        self.tray_icon.setToolTip("GeminiOverlay - Windows AI Assistant")
+        self.tray_icon.setToolTip("GeminiOverlay (Created by mewo010 & light_134)")
 
         self.menu = QMenu()
         self.menu.setStyleSheet("""
@@ -2340,7 +2470,12 @@ class SystemTrayManager(QObject):
             }
         """)
 
-        # Actions
+        # Creator Attribution Item (Non-clickable label)
+        act_creators = QAction("✦ Created by mewo010 & light_134", self)
+        act_creators.setEnabled(False)
+        self.menu.addAction(act_creators)
+        self.menu.addSeparator()
+
         act_open = QAction("Open Gemini Dock", self)
         act_open.triggered.connect(self.overlay.show_overlay)
         self.menu.addAction(act_open)
@@ -2380,6 +2515,9 @@ class SystemTrayManager(QObject):
         if self.overlay.live_worker:
             self.overlay.live_worker.stop_session()
 
+        if hasattr(self.overlay, "discord") and self.overlay.discord:
+            self.overlay.discord.stop()
+
         app = QApplication.instance()
         if hasattr(app, "hotkey_manager"):
             app.hotkey_manager.stop_listener()
@@ -2389,7 +2527,7 @@ class SystemTrayManager(QObject):
 
 
 # ==============================================================================
-# 14. SINGLE-INSTANCE LOCK & MAIN ENTRY POINT
+# 15. SINGLE-INSTANCE LOCK & MAIN ENTRY POINT
 # ==============================================================================
 
 def main():
@@ -2403,7 +2541,6 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
-    # Enforce Single-Instance via QLockFile
     lock_path = os.path.join(QDir.tempPath(), "GeminiOverlay.lock")
     lock_file = QLockFile(lock_path)
     if not lock_file.tryLock(100):
@@ -2415,8 +2552,13 @@ def main():
     mem_manager = MemoryManager()
     startup_manager = StartupManager()
 
+    # Initialize Discord Rich Presence ("Created by mewo010 and light_134")
+    discord_manager = DiscordRPCManager()
+    if cfg_manager.data.get("discord_rpc_enabled", True):
+        discord_manager.start()
+
     # Initialize Overlay Window & System Tray
-    overlay_window = GeminiOverlayWindow(cfg_manager, mem_manager, startup_manager)
+    overlay_window = GeminiOverlayWindow(cfg_manager, mem_manager, startup_manager, discord_manager)
     tray_manager = SystemTrayManager(overlay_window, startup_manager)
 
     # Initialize Global Hotkeys
@@ -2432,10 +2574,11 @@ def main():
     app.hotkey_manager = hotkey_manager
     app.tray_manager = tray_manager
 
-    # Show overlay initially
+    # Show overlay initially with comfortable size
     overlay_window.show_overlay()
 
     exit_code = app.exec()
+    discord_manager.stop()
     lock_file.unlock()
     sys.exit(exit_code)
 

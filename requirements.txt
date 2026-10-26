@@ -25,3 +25,6 @@ numpy>=1.26.0
 
 # Windows standalone executable packaging
 pyinstaller>=6.5.0
+
+# Discord Rich Presence Overlay (mewo010 & light_134)
+pypresence>=4.3.0
