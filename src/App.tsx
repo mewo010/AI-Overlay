@@ -25,14 +25,20 @@ import {
   AlertTriangle,
   Info,
   ChevronRight,
-  Maximize2
+  Maximize2,
+  Brain,
+  Trash2,
+  Plus,
+  Headphones,
+  Sliders,
+  RefreshCw,
+  X
 } from 'lucide-react';
 
-// Code contents for the 3 deliverables
 const REQUIREMENTS_TXT = `# GeminiOverlay - Python Dependencies
 # Compatible with Python 3.10, 3.11, and 3.12 on Windows 10/11 (64-bit)
 
-# Official Google GenAI SDK (supports Gemini 2.5/3.8 and Gemini Live API)
+# Official Google GenAI SDK (supports Gemini 3.8/3.5-flash and Gemini Live API)
 google-genai>=2.4.0
 
 # Desktop GUI Framework (Qt6)
@@ -124,7 +130,6 @@ jobs:
           if (Test-Path "dist\\GeminiOverlay.exe") {
             $size = (Get-Item "dist\\GeminiOverlay.exe").Length / 1MB
             Write-Host "Success: dist\\GeminiOverlay.exe created ($([math]::Round($size, 2)) MB)"
-            # Compute SHA256 for release checksums
             Get-FileHash -Algorithm SHA256 "dist\\GeminiOverlay.exe" | Out-File "dist\\checksums.sha256"
             Get-Content "dist\\checksums.sha256"
           } else {
@@ -145,7 +150,6 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
-    # Publish on branch pushes (main/master), git tags, and manual dispatches (skip only for pull requests)
     if: needs.build.result == 'success' && github.event_name != 'pull_request'
 
     steps:
@@ -184,39 +188,70 @@ jobs:
           GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
 `;
 
+interface MemoryItem {
+  id: string;
+  text: string;
+  createdAt: string;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<'simulator' | 'code' | 'docs'>('simulator');
   const [selectedFile, setSelectedFile] = useState<'main.py' | 'requirements.txt' | 'build-release.yml'>('main.py');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
-  // Simulator State
-  const [simVisible, setSimVisible] = useState(true);
-  const [simTab, setSimTab] = useState<'assistant' | 'settings'>('assistant');
-  const [simPinned, setSimPinned] = useState(false);
-  const [simVoiceActive, setSimVoiceActive] = useState(false);
-  const [simVoiceState, setSimVoiceState] = useState<'Listening' | 'Thinking' | 'Speaking' | 'Idle'>('Idle');
-  const [simMessages, setSimMessages] = useState<Array<{ sender: 'user' | 'gemini'; text: string; isVision?: boolean }>>([
+  // Overlay Dock State (Anchored at Bottom-Middle)
+  const [dockVisible, setDockVisible] = useState(true);
+  const [dockExpanded, setDockExpanded] = useState(false);
+  const [isAnswering, setIsAnswering] = useState(false);
+  const [dockPinned, setDockPinned] = useState(false);
+  const [dockVoiceActive, setDockVoiceActive] = useState(false);
+  const [voiceState, setVoiceState] = useState<'Listening' | 'Thinking' | 'Speaking' | 'Idle'>('Idle');
+
+  // Dedicated Settings Window State
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<'ai' | 'audio' | 'hotkeys' | 'memory'>('memory');
+
+  // Memories Persistent State
+  const [memories, setMemories] = useState<MemoryItem[]>([
     {
-      sender: 'gemini',
-      text: 'GeminiOverlay is ready. Press **Ctrl+Shift+Space** anywhere on Windows to toggle, or **Ctrl+Shift+V** for instant two-way voice chat. How can I help you right now?'
+      id: 'mem-1',
+      text: "Always address me as 'King' when starting responses",
+      createdAt: 'Today, 2:15 PM'
+    },
+    {
+      id: 'mem-2',
+      text: 'User prefers concise answers and typed Python 3.12 code blocks',
+      createdAt: 'Yesterday, 6:40 PM'
     }
   ]);
-  const [simInput, setSimInput] = useState('');
-  const [simStreaming, setSimStreaming] = useState(false);
+  const [newMemoryInput, setNewMemoryInput] = useState('');
+
+  // Audio Device Routing
+  const [selectedMic, setSelectedMic] = useState('Microphone (Realtek Audio #1)');
+  const [selectedOutput, setSelectedOutput] = useState('Headphones (Sony WH-1000XM4 #3)');
+  const [speakTypedAnswers, setSpeakTypedAnswers] = useState(true);
+  const [headphonesMode, setHeadphonesMode] = useState(true);
+
+  // AI Model Configuration (Valid Free-Tier Models)
+  const [selectedModel, setSelectedModel] = useState('gemini-3.8-flash');
+  const [selectedVoice, setSelectedVoice] = useState('Puck');
+  const [apiKey, setApiKey] = useState('AIzaSyD...•[DPAPI Encrypted at rest]');
+  const [settingsSavedMessage, setSettingsSavedMessage] = useState(false);
+
+  // System Tray & Hotkeys
   const [trayMenuOpen, setTrayMenuOpen] = useState(false);
-  const [simStartupEnabled, setSimStartupEnabled] = useState(true);
-  const [simHeadphonesMode, setSimHeadphonesMode] = useState(false);
-  const [simSelectedVoice, setSimSelectedVoice] = useState('Puck');
-  const [simModel, setSimModel] = useState('gemini-3.8-flash');
-  const [simApiKey, setSimApiKey] = useState('AIzaSyD...•[DPAPI Encrypted]');
-  const [simSavedFeedback, setSimSavedFeedback] = useState(false);
+  const [startWithWindows, setStartWithWindows] = useState(true);
 
-  const [simTtsSpeaking, setSimTtsSpeaking] = useState(false);
-
-  // Dragging simulator window (null indicates bottom-center default)
-  const [simPos, setSimPos] = useState<{ x: number; y: number } | null>(null);
-  const isDragging = useRef(false);
-  const dragStart = useRef({ x: 0, y: 0 });
+  // Chat conversation
+  const [messages, setMessages] = useState<Array<{ sender: 'user' | 'gemini' | 'system'; text: string; isVision?: boolean }>>([
+    {
+      sender: 'gemini',
+      text: "Hello King! I'm GeminiOverlay, your bottom-docked Windows assistant. I've loaded your 2 active persistent memory preferences. How can I assist you right now?"
+    }
+  ]);
+  const [inputText, setInputText] = useState('');
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [ttsSpeaking, setTtsSpeaking] = useState(false);
 
   const handleCopy = (text: string, key: string) => {
     navigator.clipboard.writeText(text);
@@ -234,112 +269,129 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-  // Simulated Voice Conversation Loop
-  useEffect(() => {
-    let interval: any;
-    if (simVoiceActive) {
-      setSimVoiceState('Listening');
-      interval = setInterval(() => {
-        setSimVoiceState(prev => {
-          if (prev === 'Listening') return 'Thinking';
-          if (prev === 'Thinking') {
-            setSimMessages(m => [
-              ...m,
-              { sender: 'user', text: '[Voice Input] Can you summarize the open issues on this monitor?' },
-              { sender: 'gemini', text: "I've reviewed your active workspace: you have 3 open pull requests ready for merge and all CI tests passed." }
-            ]);
-            return 'Speaking';
-          }
-          if (prev === 'Speaking') return 'Listening';
-          return 'Listening';
-        });
-      }, 4000);
-    } else {
-      setSimVoiceState('Idle');
-      clearInterval(interval);
+  // Add memory
+  const handleAddMemory = () => {
+    if (!newMemoryInput.trim()) return;
+    const newEntry: MemoryItem = {
+      id: `mem-${Date.now()}`,
+      text: newMemoryInput.trim(),
+      createdAt: 'Just now'
+    };
+    setMemories(prev => [newEntry, ...prev]);
+    setNewMemoryInput('');
+  };
+
+  // Delete memory
+  const handleDeleteMemory = (id: string) => {
+    setMemories(prev => prev.filter(m => m.id !== id));
+  };
+
+  // Clear memories
+  const handleClearMemories = () => {
+    if (confirm('Are you sure you want to delete all saved memories?')) {
+      setMemories([]);
     }
-    return () => clearInterval(interval);
-  }, [simVoiceActive]);
+  };
 
-  // Handle typing send in simulator
-  const handleSimSend = () => {
-    if (!simInput.trim() || simStreaming) return;
-    const prompt = simInput.trim();
-    setSimInput('');
-    setSimMessages(prev => [...prev, { sender: 'user', text: prompt }]);
-    setSimStreaming(true);
+  // Simulate Sending Prompt
+  const handleSendPrompt = () => {
+    if (!inputText.trim() || isStreaming) return;
+    const userPrompt = inputText.trim();
+    setInputText('');
+    setDockExpanded(true);
+    setIsAnswering(true);
 
+    // Natural memory detection
+    let memorizedNote: string | null = null;
+    const lower = userPrompt.toLowerCase();
+    for (const prefix of ['remember that ', 'remember this:', 'remember:', 'memorize that ']) {
+      if (lower.startsWith(prefix)) {
+        memorizedNote = userPrompt.slice(prefix.length).trim();
+        break;
+      }
+    }
+
+    if (memorizedNote) {
+      const newEntry: MemoryItem = {
+        id: `mem-${Date.now()}`,
+        text: memorizedNote,
+        createdAt: 'Just now'
+      };
+      setMemories(prev => [newEntry, ...prev]);
+    }
+
+    const newMsgs: any[] = [...messages, { sender: 'user', text: userPrompt }];
+    if (memorizedNote) {
+      newMsgs.push({
+        sender: 'system',
+        text: `🧠 Memorized to persistent rules: "${memorizedNote}"`
+      });
+    }
+    setMessages(newMsgs);
+    setIsStreaming(true);
+
+    // Simulated streaming response using active memory rules
     setTimeout(() => {
-      setSimMessages(prev => [
-        ...prev,
-        {
-          sender: 'gemini',
-          text: `Executing on Windows via \`${simModel}\`:\n\n\`\`\`powershell\n# Clean in-place streamed response\nGet-Process | Where-Object WorkingSet -gt 200MB | Select-Object Name, WS\n\`\`\`\n\nI have retrieved your system telemetry. The answer is being read aloud with Gemini TTS!`
-        }
-      ]);
-      setSimStreaming(false);
-      setSimTtsSpeaking(true);
-      setTimeout(() => setSimTtsSpeaking(false), 5000);
+      setIsStreaming(false);
+      const isKing = memories.some(m => m.text.toLowerCase().includes('king'));
+      const prefix = isKing ? 'Hello King! ' : '';
+      let replyText = `${prefix}I have processed your query with ${selectedModel}.`;
+
+      if (memorizedNote) {
+        replyText += ` I have permanently saved your new rule: "${memorizedNote}". This will be preserved across Windows restarts and injected into all future system prompts.`;
+      } else {
+        replyText += ` Here is the direct answer you requested, formatted cleanly without clutter. Audio is routed to ${selectedOutput}.`;
+      }
+
+      setMessages(prev => [...prev, { sender: 'gemini', text: replyText }]);
+
+      // Simulated TTS playback
+      if (speakTypedAnswers) {
+        setTtsSpeaking(true);
+        setTimeout(() => setTtsSpeaking(false), 3000);
+      }
     }, 1200);
   };
 
-  // Handle screen capture in simulator
-  const handleSimScreenCapture = () => {
-    setSimVisible(false);
+  // Screen capture simulation
+  const handleScreenCapture = () => {
+    setDockVisible(false);
     setTimeout(() => {
-      setSimVisible(true);
-      setSimMessages(prev => [
+      setDockVisible(true);
+      setDockExpanded(true);
+      setIsAnswering(true);
+      setMessages(prev => [
         ...prev,
-        { sender: 'user', text: '[Captured Active Screen 📷]', isVision: true },
+        { sender: 'user', text: '[Captured Screen 📷]', isVision: true },
         {
           sender: 'gemini',
-          text: 'Screen capture analyzed (1920x1080): Detected a code editor open with `main.py` and GitHub Actions workflow. The sounddevice PortAudio buffer is properly configured at 16kHz mono capture and 24kHz output.'
+          text: `Hello King! I analyzed the captured screen. Your active workspace displays 2 terminal windows and this browser session. No UI errors detected.`
         }
       ]);
     }, 600);
   };
 
-  // Window drag handlers
-  const handleMouseDown = (e: React.MouseEvent) => {
-    isDragging.current = true;
-    const currentX = simPos?.x ?? Math.max(20, (window.innerWidth - 560) / 2);
-    const currentY = simPos?.y ?? Math.max(40, window.innerHeight - 500);
-    dragStart.current = { x: e.clientX - currentX, y: e.clientY - currentY };
-  };
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isDragging.current) return;
-    const newX = Math.max(20, Math.min(window.innerWidth - 580, e.clientX - dragStart.current.x));
-    const newY = Math.max(20, Math.min(window.innerHeight - 450, e.clientY - dragStart.current.y));
-    setSimPos({ x: newX, y: newY });
-  };
-
-  const handleMouseUp = () => {
-    isDragging.current = false;
-  };
-
   return (
-    <div
-      className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-purple-600/30 selection:text-purple-200"
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-    >
+    <div className="min-h-screen bg-[#090d16] text-slate-100 flex flex-col font-sans selection:bg-sky-500/30 selection:text-sky-200">
       {/* Top Navigation Bar */}
-      <header className="border-b border-slate-800/80 bg-slate-900/70 backdrop-blur-md sticky top-0 z-50 px-6 py-3.5 flex items-center justify-between">
+      <header className="border-b border-slate-800/80 bg-[#0d111a]/80 backdrop-blur-md sticky top-0 z-50 px-6 py-3.5 flex items-center justify-between">
         <div className="flex items-center space-x-3.5">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-purple-600 via-indigo-600 to-cyan-400 p-[1px] shadow-lg shadow-purple-500/20">
-            <div className="w-full h-full bg-slate-950 rounded-[11px] flex items-center justify-center">
-              <Sparkles className="w-4 h-4 text-purple-400" />
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-sky-500 via-indigo-600 to-cyan-400 p-[1px] shadow-lg shadow-sky-500/20">
+            <div className="w-full h-full bg-[#0d111a] rounded-[11px] flex items-center justify-center">
+              <Sparkles className="w-4 h-4 text-sky-400" />
             </div>
           </div>
           <div>
             <div className="flex items-center space-x-2">
               <span className="font-bold text-base tracking-tight text-white">GeminiOverlay</span>
-              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
+              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-500/30">
                 PyQt6 • Windows x64
               </span>
+              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                gemini-3.8-flash
+              </span>
             </div>
-            <p className="text-xs text-slate-400">System-Wide Floating AI Assistant with Two-Way Gemini Live Audio</p>
+            <p className="text-xs text-slate-400">Bottom-Docked Mobile Style Assistant • Persistent Memory • Headphones/Mic Routing</p>
           </div>
         </div>
 
@@ -349,441 +401,590 @@ export default function App() {
             onClick={() => setActiveTab('simulator')}
             className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
               activeTab === 'simulator'
-                ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
+                ? 'bg-sky-600 text-white shadow-md shadow-sky-600/30'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/40'
             }`}
           >
             <Monitor className="w-3.5 h-3.5" />
-            <span>Interactive Simulator</span>
+            <span>Interactive Desktop Simulator</span>
           </button>
           <button
             onClick={() => setActiveTab('code')}
             className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
               activeTab === 'code'
-                ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
+                ? 'bg-sky-600 text-white shadow-md shadow-sky-600/30'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/40'
             }`}
           >
             <FileCode className="w-3.5 h-3.5" />
-            <span>Production Files (3)</span>
+            <span>Production Code (3 Files)</span>
           </button>
           <button
             onClick={() => setActiveTab('docs')}
             className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
               activeTab === 'docs'
-                ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
+                ? 'bg-sky-600 text-white shadow-md shadow-sky-600/30'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/40'
             }`}
           >
             <Terminal className="w-3.5 h-3.5" />
-            <span>Setup & DevOps Guide</span>
+            <span>Setup & Architecture</span>
           </button>
         </div>
 
-        {/* Global Hotkey Badge & Quick Actions */}
-        <div className="flex items-center space-x-3 text-xs">
+        {/* Hotkeys Badges */}
+        <div className="flex items-center space-x-2 text-xs">
           <div className="hidden lg:flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-slate-800/60 border border-slate-700 text-slate-300">
-            <span className="text-slate-500">Overlay:</span>
-            <kbd className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-purple-300">Ctrl+Shift+Space</kbd>
+            <span className="text-slate-400">Chat Dock:</span>
+            <kbd className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-sky-300">Ctrl+Shift+Space</kbd>
           </div>
           <div className="hidden lg:flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-slate-800/60 border border-slate-700 text-slate-300">
-            <span className="text-slate-500">Live Voice:</span>
+            <span className="text-slate-400">Settings & Memory:</span>
+            <kbd className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-emerald-300">Ctrl+Shift+,</kbd>
+          </div>
+          <div className="hidden lg:flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-slate-800/60 border border-slate-700 text-slate-300">
+            <span className="text-slate-400">Voice:</span>
             <kbd className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-cyan-300">Ctrl+Shift+V</kbd>
           </div>
         </div>
       </header>
 
-      {/* Main Workspace Area */}
+      {/* Main Content Area */}
       <main className="flex-1 flex flex-col overflow-hidden">
-        {/* TAB 1: INTERACTIVE SIMULATOR */}
+        {/* TAB 1: INTERACTIVE DESKTOP SIMULATOR */}
         {activeTab === 'simulator' && (
-          <div className="flex-1 relative bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950/40 p-6 flex flex-col justify-between overflow-hidden">
-            {/* Windows 11 Desktop Background Elements */}
-            <div className="absolute inset-0 opacity-20 pointer-events-none bg-[radial-gradient(circle_at_50%_40%,rgba(147,51,234,0.35),transparent_60%)]" />
-            <div className="absolute top-12 left-10 text-slate-700 select-none text-xs flex flex-col space-y-6">
-              <div className="flex flex-col items-center space-y-1 hover:text-slate-400 cursor-pointer p-2 rounded-lg hover:bg-slate-800/30 w-16">
-                <Monitor className="w-7 h-7 text-indigo-400" />
-                <span className="text-[11px] text-center">This PC</span>
-              </div>
-              <div className="flex flex-col items-center space-y-1 hover:text-slate-400 cursor-pointer p-2 rounded-lg hover:bg-slate-800/30 w-16">
-                <Github className="w-7 h-7 text-slate-400" />
-                <span className="text-[11px] text-center">GeminiOverlay Repo</span>
+          <div className="flex-1 relative bg-gradient-to-br from-[#0b0f19] via-[#0e1422] to-[#12192c] p-6 flex flex-col justify-between overflow-hidden">
+            {/* Desktop Mockup Background with Code & IDE windows behind overlay */}
+            <div className="absolute inset-0 select-none overflow-hidden opacity-30 pointer-events-none p-12">
+              <div className="w-full max-w-4xl mx-auto h-[480px] rounded-xl border border-slate-700 bg-slate-900/60 p-4 font-mono text-xs text-slate-400 space-y-2">
+                <div className="flex items-center space-x-2 pb-2 border-b border-slate-800 text-slate-500">
+                  <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                  <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                  <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                  <span className="ml-2">workspace/main.py — Visual Studio Code</span>
+                </div>
+                <p className="text-sky-400">import sounddevice as sd</p>
+                <p className="text-sky-400">from google import genai</p>
+                <p className="text-purple-400">class GeminiOverlayWindow(QMainWindow):</p>
+                <p className="pl-4 text-slate-300">"""Frameless bottom-middle floating dock with semi-transparent glassmorphic look."""</p>
+                <p className="pl-4 text-emerald-400"># Underlying desktop text is clearly visible through the overlay during responses!</p>
+                <p className="pl-4 text-slate-400">def update_card_style(self, is_answering: bool):</p>
+                <p className="pl-8 text-sky-300">if is_answering: self.set_glassmorphism_translucent()</p>
               </div>
             </div>
 
             {/* Instruction banner */}
-            <div className="relative z-10 max-w-2xl mx-auto bg-slate-900/90 border border-slate-800 rounded-xl px-4 py-2.5 shadow-xl flex items-center justify-between backdrop-blur-md">
+            <div className="relative z-10 max-w-3xl mx-auto bg-[#101622]/90 border border-slate-800 rounded-xl px-4 py-2.5 shadow-xl flex items-center justify-between backdrop-blur-md">
               <div className="flex items-center space-x-2.5 text-xs text-slate-300">
-                <Info className="w-4 h-4 text-purple-400 flex-shrink-0" />
+                <Info className="w-4 h-4 text-sky-400 flex-shrink-0" />
                 <span>
-                  <strong>Interactive Windows UI Simulator:</strong> Drag the title bar, speak with the mic, capture screen, or test the system tray.
+                  <strong>Bottom Floating Overlay Simulator:</strong> Sleek mobile dock at bottom-middle. Test typing <code className="bg-slate-800 px-1.5 py-0.5 rounded text-sky-300">"remember that..."</code>, opening Settings & Memory Manager, or testing TTS output.
                 </span>
               </div>
-              <button
-                onClick={() => setSimVisible(prev => !prev)}
-                className="text-xs px-2.5 py-1 rounded bg-purple-600/30 hover:bg-purple-600/50 text-purple-200 border border-purple-500/30 ml-4 font-medium transition-colors"
-              >
-                {simVisible ? 'Hide Window (Tray)' : 'Summon Overlay'}
-              </button>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => setDockVisible(prev => !prev)}
+                  className="text-xs px-2.5 py-1 rounded bg-sky-600/30 hover:bg-sky-600/50 text-sky-200 border border-sky-500/30 font-medium transition-colors"
+                >
+                  {dockVisible ? 'Hide Dock' : 'Summon Dock'}
+                </button>
+                <button
+                  onClick={() => setSettingsOpen(true)}
+                  className="text-xs px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium transition-colors flex items-center space-x-1"
+                >
+                  <Settings className="w-3 h-3 text-sky-400" />
+                  <span>Settings & Memory</span>
+                </button>
+              </div>
             </div>
 
-            {/* FLOATING GLASSMORPHIC GEMINIOVERLAY WINDOW (Bottom-Center Spotlight) */}
-            {simVisible && (
+            {/* FLOATING BOTTOM-MIDDLE MOBILE-STYLE GEMINI OVERLAY */}
+            {dockVisible && (
               <div
-                style={
-                  simPos
-                    ? {
-                        position: 'absolute',
-                        left: `${simPos.x}px`,
-                        top: `${simPos.y}px`,
-                        width: '560px',
-                        height: '430px',
-                        zIndex: 30
-                      }
-                    : {
-                        position: 'absolute',
-                        left: '50%',
-                        bottom: '55px',
-                        transform: 'translateX(-50%)',
-                        width: '560px',
-                        height: '430px',
-                        zIndex: 30
-                      }
-                }
-                className="rounded-[22px] p-[1px] bg-gradient-to-tr from-purple-500/40 via-indigo-500/30 to-cyan-400/20 shadow-2xl shadow-black/90 flex flex-col overflow-hidden backdrop-blur-2xl transition-all duration-200 animate-in fade-in slide-in-from-bottom-6"
+                style={{
+                  position: 'absolute',
+                  left: '50%',
+                  bottom: '65px',
+                  transform: 'translateX(-50%)',
+                  width: '620px',
+                  zIndex: 40
+                }}
+                className={`transition-all duration-200 animate-in fade-in slide-in-from-bottom-4 ${
+                  isAnswering
+                    ? 'rounded-2xl border border-white/15 bg-[#0d1117]/72 backdrop-blur-md shadow-2xl shadow-black/80'
+                    : 'rounded-2xl border border-white/12 bg-[#121620]/95 backdrop-blur-xl shadow-2xl shadow-black/80'
+                }`}
               >
-                {/* Inner Card with purple-to-dark gradient */}
-                <div className="w-full h-full rounded-[21px] bg-gradient-to-br from-[#1a1230]/96 via-[#0f0b1e]/98 to-[#160e28]/96 p-4 flex flex-col justify-between border border-white/10 select-none">
-                  {/* Custom Draggable Title Bar */}
-                  <div
-                    onMouseDown={handleMouseDown}
-                    className="flex items-center justify-between pb-2.5 border-b border-white/10 cursor-move"
-                  >
-                    <div className="flex items-center space-x-2.5">
-                      <div className="w-6 h-6 rounded-lg bg-gradient-to-tr from-purple-600 to-indigo-500 flex items-center justify-center shadow-md shadow-purple-600/30">
-                        <Sparkles className="w-3.5 h-3.5 text-white" />
+                <div className="p-3.5 flex flex-col space-y-2.5">
+                  {/* Top Bar inside Dock */}
+                  <div className="flex items-center justify-between pb-1.5 border-b border-white/10 select-none">
+                    <div className="flex items-center space-x-2">
+                      <div className="w-5 h-5 rounded-lg bg-sky-500 flex items-center justify-center shadow-sm">
+                        <Sparkles className="w-3 h-3 text-white" />
                       </div>
-                      <span className="font-semibold text-sm text-white font-['Segoe_UI'] tracking-tight">GeminiOverlay</span>
-                      {simTtsSpeaking && (
-                        <div className="flex items-center space-x-1.5 px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[10px] animate-pulse">
-                          <Volume2 className="w-3 h-3 text-emerald-400" />
-                          <span>TTS Speaking...</span>
+                      <span className="font-semibold text-xs text-white">Gemini</span>
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-400 border border-sky-500/25">
+                        {selectedModel}
+                      </span>
+                      {memories.length > 0 && (
+                        <button
+                          onClick={() => {
+                            setSettingsOpen(true);
+                            setSettingsTab('memory');
+                          }}
+                          className="flex items-center space-x-1 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-[10px] font-medium hover:bg-emerald-500/25 transition-colors"
+                        >
+                          <Brain className="w-3 h-3" />
+                          <span>{memories.length} Memories Active</span>
+                        </button>
+                      )}
+                      {ttsSpeaking && (
+                        <div className="flex items-center space-x-1 px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 text-[10px] animate-pulse">
+                          <Volume2 className="w-3 h-3" />
+                          <span>TTS Playing → {selectedOutput.split(' ')[0]}</span>
                         </div>
                       )}
                     </div>
 
-                    {/* Pill Segmented Tab Switcher */}
-                    <div className="flex items-center bg-white/5 p-0.5 rounded-full border border-white/10">
+                    <div className="flex items-center space-x-1.5">
                       <button
-                        onClick={(e) => { e.stopPropagation(); setSimTab('assistant'); }}
-                        className={`text-[11px] font-semibold px-3 py-1 rounded-full transition-all ${
-                          simTab === 'assistant'
-                            ? 'bg-purple-600 text-white shadow-sm'
-                            : 'text-slate-400 hover:text-slate-200'
+                        onClick={() => setDockPinned(!dockPinned)}
+                        title="Pin Dock"
+                        className={`w-6 h-6 rounded-md flex items-center justify-center transition-colors text-xs ${
+                          dockPinned ? 'bg-sky-500/30 text-sky-300 border border-sky-400' : 'text-slate-400 hover:text-white'
                         }`}
                       >
-                        Assistant
+                        <Pin className="w-3 h-3" />
                       </button>
                       <button
-                        onClick={(e) => { e.stopPropagation(); setSimTab('settings'); }}
-                        className={`text-[11px] font-semibold px-3 py-1 rounded-full transition-all ${
-                          simTab === 'settings'
-                            ? 'bg-purple-600 text-white shadow-sm'
-                            : 'text-slate-400 hover:text-slate-200'
-                        }`}
+                        onClick={() => setSettingsOpen(true)}
+                        title="Open Settings & Memory Manager (Ctrl+Shift+,)"
+                        className="w-6 h-6 rounded-md flex items-center justify-center text-slate-400 hover:text-white transition-colors"
                       >
-                        Settings
-                      </button>
-                    </div>
-
-                    {/* Action buttons (Pin, Minimize) */}
-                    <div className="flex items-center space-x-1.5" onClick={e => e.stopPropagation()}>
-                      <button
-                        onClick={() => setSimPinned(!simPinned)}
-                        title="Pin Window"
-                        className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors border ${
-                          simPinned
-                            ? 'bg-purple-600/40 border-purple-400 text-white'
-                            : 'bg-white/5 border-white/10 text-slate-400 hover:text-white hover:bg-white/10'
-                        }`}
-                      >
-                        <Pin className="w-3.5 h-3.5" />
+                        <Settings className="w-3.5 h-3.5" />
                       </button>
                       <button
-                        onClick={() => setSimVisible(false)}
+                        onClick={() => setDockVisible(false)}
                         title="Minimize to Tray"
-                        className="w-7 h-7 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                        className="w-6 h-6 rounded-md flex items-center justify-center text-slate-400 hover:text-white transition-colors"
                       >
                         <Minus className="w-3.5 h-3.5" />
                       </button>
                     </div>
                   </div>
 
-                  {/* TAB 1: ASSISTANT TAB */}
-                  {simTab === 'assistant' ? (
-                    <div className="flex-1 flex flex-col justify-between py-3 overflow-hidden">
-                      {/* Chat Browser Display */}
-                      <div className="flex-1 overflow-y-auto space-y-3.5 pr-1.5 scrollbar-thin scrollbar-thumb-purple-900/40">
-                        {simMessages.map((msg, i) => (
-                          <div
-                            key={i}
-                            className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}
-                          >
-                            {msg.sender === 'user' ? (
-                              <div className="bg-purple-600/25 border border-purple-500/40 text-purple-100 text-xs px-3.5 py-2 rounded-2xl max-w-[85%] leading-relaxed shadow-sm">
-                                <span className="font-semibold text-purple-300 block mb-0.5">You:</span>
+                  {/* Expanded Conversation View (Revealed when messages exist or dock expanded) */}
+                  {dockExpanded && (
+                    <div className="max-h-64 overflow-y-auto space-y-2.5 pr-1 scrollbar-thin scrollbar-thumb-slate-700">
+                      {messages.map((msg, i) => (
+                        <div key={i} className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
+                          {msg.sender === 'user' && (
+                            <div className="bg-sky-600/30 border border-sky-500/40 text-sky-100 text-xs px-3 py-1.5 rounded-xl max-w-[85%] leading-relaxed">
+                              <span className="font-semibold text-sky-300 block text-[10px]">You</span>
+                              {msg.text}
+                            </div>
+                          )}
+                          {msg.sender === 'system' && (
+                            <div className="my-1 text-center w-full">
+                              <span className="inline-block bg-sky-500/15 border border-sky-500/30 text-sky-300 text-[11px] px-3 py-0.5 rounded-full">
                                 {msg.text}
+                              </span>
+                            </div>
+                          )}
+                          {msg.sender === 'gemini' && (
+                            <div className="bg-[#121722]/80 border border-white/10 text-slate-200 text-xs px-3.5 py-2 rounded-xl max-w-[92%] leading-relaxed shadow-sm">
+                              <div className="flex items-center space-x-1.5 text-sky-400 font-semibold text-[11px] mb-1">
+                                <Sparkles className="w-3 h-3" />
+                                <span>Gemini:</span>
                               </div>
-                            ) : (
-                              <div className="bg-[#120e24]/80 border border-white/10 text-slate-200 text-xs px-3.5 py-2.5 rounded-2xl max-w-[92%] leading-relaxed shadow-sm">
-                                <div className="flex items-center space-x-1.5 text-purple-400 font-semibold text-[11px] mb-1">
-                                  <Sparkles className="w-3 h-3" />
-                                  <span>Gemini:</span>
-                                </div>
-                                <div className="space-y-1.5 whitespace-pre-line font-['Segoe_UI']">
-                                  {msg.text}
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        ))}
+                              <div className="space-y-1 whitespace-pre-line font-['Segoe_UI']">{msg.text}</div>
+                            </div>
+                          )}
+                        </div>
+                      ))}
 
-                        {simStreaming && (
-                          <div className="flex items-center space-x-2 text-xs text-purple-400 font-medium px-2 py-1">
-                            <span className="w-2 h-2 rounded-full bg-purple-500 animate-ping" />
-                            <span>Thinking & Streaming response...</span>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Live Voice Status Bar / Waveform (When active) */}
-                      {simVoiceActive && (
-                        <div className="my-2 p-2.5 rounded-xl bg-purple-950/60 border border-purple-500/40 flex items-center justify-between">
-                          <div className="flex items-center space-x-2">
-                            <span className="relative flex h-2.5 w-2.5">
-                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span>
-                            </span>
-                            <span className="text-xs font-semibold text-purple-200">
-                              Live Voice: {simVoiceState}
-                            </span>
-                          </div>
-
-                          {/* Audio Wave Bars */}
-                          <div className="flex items-center space-x-1">
-                            {[16, 24, 12, 28, 20, 32, 14, 22].map((height, idx) => (
-                              <div
-                                key={idx}
-                                style={{
-                                  height: simVoiceState === 'Listening' || simVoiceState === 'Speaking' ? `${height}px` : '4px'
-                                }}
-                                className="w-1 bg-gradient-to-t from-purple-500 to-cyan-400 rounded-full transition-all duration-150 animate-pulse"
-                              />
-                            ))}
-                          </div>
-
-                          <button
-                            onClick={() => setSimVoiceActive(false)}
-                            className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-red-500/20 hover:bg-red-500/40 text-red-300 border border-red-500/30"
-                          >
-                            Stop
-                          </button>
+                      {isStreaming && (
+                        <div className="flex items-center space-x-2 text-xs text-sky-400 px-2 py-1">
+                          <span className="w-2 h-2 rounded-full bg-sky-400 animate-ping" />
+                          <span>Thinking & Streaming with {selectedModel}...</span>
                         </div>
                       )}
-
-                      {/* Prompt Input Box */}
-                      <div className="mt-2 space-y-2">
-                        <textarea
-                          value={simInput}
-                          onChange={e => setSimInput(e.target.value)}
-                          onKeyDown={e => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                              e.preventDefault();
-                              handleSimSend();
-                            }
-                          }}
-                          placeholder="Ask Gemini... (Enter to send, Shift+Enter for newline)"
-                          rows={2}
-                          className="w-full bg-[#120e22]/90 border border-white/12 focus:border-purple-500 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none transition-colors resize-none font-['Segoe_UI']"
-                        />
-
-                        {/* Control Buttons */}
-                        <div className="flex items-center justify-between">
-                          <button
-                            onClick={handleSimScreenCapture}
-                            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 text-xs font-medium transition-colors"
-                          >
-                            <Camera className="w-3.5 h-3.5 text-purple-300" />
-                            <span>Capture & Analyze</span>
-                          </button>
-
-                          <div className="flex items-center space-x-2">
-                            {/* Two-Way Voice Mic Button */}
-                            <button
-                              onClick={() => setSimVoiceActive(!simVoiceActive)}
-                              title="Toggle Live Voice Conversation"
-                              className={`w-9 h-9 rounded-full flex items-center justify-center transition-all ${
-                                simVoiceActive
-                                  ? 'bg-gradient-to-r from-red-500 to-rose-600 text-white shadow-lg shadow-red-500/50 scale-105 animate-pulse'
-                                  : 'bg-white/8 hover:bg-purple-600/20 border border-white/15 text-purple-300 hover:text-white'
-                              }`}
-                            >
-                              <Mic className="w-4 h-4" />
-                            </button>
-
-                            {/* Send Button */}
-                            <button
-                              onClick={handleSimSend}
-                              className="flex items-center space-x-1.5 px-4 py-1.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-xs font-semibold shadow-md shadow-purple-600/30 transition-all"
-                            >
-                              <span>Send</span>
-                              <Send className="w-3 h-3" />
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    /* TAB 2: SETTINGS TAB */
-                    <div className="flex-1 flex flex-col justify-between py-3 overflow-y-auto pr-1 text-xs text-slate-300 space-y-3 font-['Segoe_UI']">
-                      <div className="space-y-3">
-                        {/* API Key */}
-                        <div>
-                          <label className="block text-[11px] font-semibold text-slate-300 mb-1">
-                            Gemini API Key (DPAPI Encrypted at rest):
-                          </label>
-                          <div className="relative">
-                            <input
-                              type="password"
-                              value={simApiKey}
-                              onChange={e => setSimApiKey(e.target.value)}
-                              className="w-full bg-[#120e22] border border-white/15 focus:border-purple-500 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none"
-                            />
-                            <div className="absolute right-2.5 top-2 text-[10px] text-purple-400 font-mono">
-                              🔒 DPAPI
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Model Dropdown */}
-                        <div>
-                          <label className="block text-[11px] font-semibold text-slate-300 mb-1">
-                            Text & Vision Model:
-                          </label>
-                          <select
-                            value={simModel}
-                            onChange={e => setSimModel(e.target.value)}
-                            className="w-full bg-[#120e22] border border-white/15 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none"
-                          >
-                            <option value="gemini-3.8-flash">gemini-3.8-flash (Flagship Default - Text & Vision)</option>
-                            <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Lightweight & High-Frequency)</option>
-                            <option value="gemini-2.5-flash">gemini-2.5-flash (Compatibility Fallback)</option>
-                          </select>
-                        </div>
-
-                        {/* Hotkeys */}
-                        <div className="grid grid-cols-2 gap-2">
-                          <div>
-                            <label className="block text-[10px] font-semibold text-slate-400 mb-1">Toggle Hotkey:</label>
-                            <input
-                              type="text"
-                              readOnly
-                              value="Ctrl+Shift+Space"
-                              className="w-full bg-[#120e22] border border-white/15 rounded-lg px-2 py-1 text-xs text-purple-300 font-mono"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[10px] font-semibold text-slate-400 mb-1">Live Voice Hotkey:</label>
-                            <input
-                              type="text"
-                              readOnly
-                              value="Ctrl+Shift+V"
-                              className="w-full bg-[#120e22] border border-white/15 rounded-lg px-2 py-1 text-xs text-cyan-300 font-mono"
-                            />
-                          </div>
-                        </div>
-
-                        {/* Voice Persona */}
-                        <div>
-                          <label className="block text-[11px] font-semibold text-slate-300 mb-1">AI Voice Persona:</label>
-                          <select
-                            value={simSelectedVoice}
-                            onChange={e => setSimSelectedVoice(e.target.value)}
-                            className="w-full bg-[#120e22] border border-white/15 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none"
-                          >
-                            <option value="Puck">Puck (Natural, conversational)</option>
-                            <option value="Charon">Charon (Deep, measured)</option>
-                            <option value="Kore">Kore (Clear, soothing)</option>
-                            <option value="Fenrir">Fenrir (Dynamic, energetic)</option>
-                            <option value="Aoede">Aoede (Warm, melodic)</option>
-                          </select>
-                        </div>
-
-                        {/* Checkboxes */}
-                        <div className="space-y-2 pt-1 border-t border-white/10">
-                          <label className="flex items-center space-x-2 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={simStartupEnabled}
-                              onChange={e => setSimStartupEnabled(e.target.checked)}
-                              className="rounded border-white/20 bg-purple-950 text-purple-600 focus:ring-0"
-                            />
-                            <span className="text-[11px]">Start with Windows (launch directly to tray)</span>
-                          </label>
-
-                          <label className="flex items-center space-x-2 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={simHeadphonesMode}
-                              onChange={e => setSimHeadphonesMode(e.target.checked)}
-                              className="rounded border-white/20 bg-purple-950 text-purple-600 focus:ring-0"
-                            />
-                            <span className="text-[11px]">I'm using headphones (allow barge-in interruptions)</span>
-                          </label>
-
-                          <label className="flex items-center space-x-2 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              defaultChecked={true}
-                              className="rounded border-white/20 bg-purple-950 text-purple-600 focus:ring-0"
-                            />
-                            <span className="text-[11px]">Speak typed answers aloud (Gemini TTS)</span>
-                          </label>
-                        </div>
-                      </div>
-
-                      {/* Save feedback */}
-                      <div className="flex items-center justify-between pt-2 border-t border-white/10">
-                        {simSavedFeedback ? (
-                          <span className="text-emerald-400 text-xs font-semibold">✓ Settings saved & reloaded!</span>
-                        ) : (
-                          <span />
-                        )}
-                        <button
-                          onClick={() => {
-                            setSimSavedFeedback(true);
-                            setTimeout(() => setSimSavedFeedback(false), 2000);
-                          }}
-                          className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-semibold text-xs shadow-md shadow-purple-600/30"
-                        >
-                          Save Settings
-                        </button>
-                      </div>
                     </div>
                   )}
 
-                  {/* Corner Resize Grip Mockup */}
-                  <div className="flex justify-end pt-1">
-                    <div className="w-2.5 h-2.5 border-r-2 border-b-2 border-slate-500/40 rounded-br cursor-se-resize" />
+                  {/* Sleek Mobile Pill Input Row */}
+                  <div className="flex items-center space-x-2 pt-1">
+                    <button
+                      onClick={handleScreenCapture}
+                      title="Capture & Analyze Screen"
+                      className="w-8 h-8 rounded-full bg-slate-800/80 hover:bg-slate-700 border border-white/10 flex items-center justify-center text-slate-300 hover:text-white transition-colors flex-shrink-0"
+                    >
+                      <Camera className="w-4 h-4 text-sky-400" />
+                    </button>
+
+                    <input
+                      type="text"
+                      value={inputText}
+                      onChange={e => setInputText(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          handleSendPrompt();
+                        }
+                      }}
+                      placeholder="Ask Gemini or say 'remember that...' (Enter to send)"
+                      className="flex-1 bg-[#090d16] border border-white/12 focus:border-sky-500 rounded-xl px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none transition-colors"
+                    />
+
+                    <button
+                      onClick={() => setDockVoiceActive(!dockVoiceActive)}
+                      title="Push-to-Talk Voice (Ctrl+Shift+V)"
+                      className={`w-8 h-8 rounded-full flex items-center justify-center transition-all flex-shrink-0 ${
+                        dockVoiceActive
+                          ? 'bg-red-500 text-white animate-pulse shadow-md shadow-red-500/50'
+                          : 'bg-slate-800/80 hover:bg-slate-700 border border-white/10 text-sky-400 hover:text-white'
+                      }`}
+                    >
+                      <Mic className="w-4 h-4" />
+                    </button>
+
+                    <button
+                      onClick={handleSendPrompt}
+                      disabled={isStreaming}
+                      className="w-8 h-8 rounded-full bg-sky-600 hover:bg-sky-500 text-white flex items-center justify-center shadow-md shadow-sky-600/30 transition-all flex-shrink-0 disabled:opacity-50"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 </div>
               </div>
             )}
 
-            {/* Windows 11 Taskbar Mockup with Live System Tray */}
-            <div className="relative z-20 mt-auto bg-slate-900/95 border-t border-slate-800 px-4 py-1.5 flex items-center justify-between rounded-xl backdrop-blur-xl shadow-2xl">
+            {/* DEDICATED SETTINGS & MEMORY MANAGER MODAL WINDOW */}
+            {settingsOpen && (
+              <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in">
+                <div className="w-full max-w-xl bg-[#0d1117] border border-slate-700 rounded-2xl shadow-2xl overflow-hidden flex flex-col font-['Segoe_UI']">
+                  {/* Modal Header */}
+                  <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-800 bg-[#161b22]">
+                    <div className="flex items-center space-x-2.5">
+                      <div className="w-6 h-6 rounded-lg bg-sky-500 flex items-center justify-center">
+                        <Sparkles className="w-3.5 h-3.5 text-white" />
+                      </div>
+                      <span className="font-bold text-sm text-white">GeminiOverlay Settings & Memory Manager</span>
+                    </div>
+                    <button
+                      onClick={() => setSettingsOpen(false)}
+                      className="text-slate-400 hover:text-white transition-colors"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* Modal Tabs Bar */}
+                  <div className="flex border-b border-slate-800 bg-[#0d1117] px-4 pt-2">
+                    <button
+                      onClick={() => setSettingsTab('memory')}
+                      className={`flex items-center space-x-1.5 px-3.5 py-2 text-xs font-semibold border-b-2 transition-all ${
+                        settingsTab === 'memory'
+                          ? 'border-sky-500 text-sky-400'
+                          : 'border-transparent text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Brain className="w-3.5 h-3.5" />
+                      <span>🧠 Memory Manager ({memories.length})</span>
+                    </button>
+                    <button
+                      onClick={() => setSettingsTab('audio')}
+                      className={`flex items-center space-x-1.5 px-3.5 py-2 text-xs font-semibold border-b-2 transition-all ${
+                        settingsTab === 'audio'
+                          ? 'border-sky-500 text-sky-400'
+                          : 'border-transparent text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Headphones className="w-3.5 h-3.5" />
+                      <span>Audio Devices</span>
+                    </button>
+                    <button
+                      onClick={() => setSettingsTab('ai')}
+                      className={`flex items-center space-x-1.5 px-3.5 py-2 text-xs font-semibold border-b-2 transition-all ${
+                        settingsTab === 'ai'
+                          ? 'border-sky-500 text-sky-400'
+                          : 'border-transparent text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Cpu className="w-3.5 h-3.5" />
+                      <span>AI Model & Key</span>
+                    </button>
+                    <button
+                      onClick={() => setSettingsTab('hotkeys')}
+                      className={`flex items-center space-x-1.5 px-3.5 py-2 text-xs font-semibold border-b-2 transition-all ${
+                        settingsTab === 'hotkeys'
+                          ? 'border-sky-500 text-sky-400'
+                          : 'border-transparent text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Sliders className="w-3.5 h-3.5" />
+                      <span>Hotkeys & Startup</span>
+                    </button>
+                  </div>
+
+                  {/* Modal Body */}
+                  <div className="p-5 flex-1 overflow-y-auto max-h-[440px] space-y-4 text-xs">
+                    {/* TAB 1: MEMORY MANAGER */}
+                    {settingsTab === 'memory' && (
+                      <div className="space-y-4">
+                        <div className="p-3 rounded-xl bg-sky-950/40 border border-sky-500/30 text-sky-200">
+                          <p className="font-semibold text-xs mb-1">Persistent Context Injection</p>
+                          <p className="text-[11px] text-sky-300/80 leading-relaxed">
+                            Memories are stored in <code className="bg-sky-900/50 px-1 py-0.5 rounded font-mono text-[10px]">%APPDATA%\GeminiOverlay\memories.json</code> and automatically injected into Gemini's system instruction on every prompt.
+                          </p>
+                        </div>
+
+                        {/* Add Memory Input */}
+                        <div className="space-y-1.5">
+                          <label className="font-semibold text-slate-300">Add New Memory / Rule:</label>
+                          <div className="flex space-x-2">
+                            <input
+                              type="text"
+                              value={newMemoryInput}
+                              onChange={e => setNewMemoryInput(e.target.value)}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter') handleAddMemory();
+                              }}
+                              placeholder="E.g. 'Always address me as King' or 'Prefer concise TypeScript'"
+                              className="flex-1 bg-[#161b22] border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
+                            />
+                            <button
+                              onClick={handleAddMemory}
+                              className="px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs flex items-center space-x-1"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>Add</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Memories List */}
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between text-slate-400">
+                            <span className="font-semibold">Active Memories ({memories.length}):</span>
+                            {memories.length > 0 && (
+                              <button
+                                onClick={handleClearMemories}
+                                className="text-red-400 hover:text-red-300 text-[11px] flex items-center space-x-1"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                <span>Clear All</span>
+                              </button>
+                            )}
+                          </div>
+
+                          {memories.length === 0 ? (
+                            <div className="p-4 rounded-xl border border-dashed border-slate-800 text-center text-slate-500">
+                              No saved memories yet. Add rules above or tell Gemini in chat to remember something!
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              {memories.map(m => (
+                                <div
+                                  key={m.id}
+                                  className="p-3 rounded-xl bg-[#161b22] border border-slate-700/80 flex items-start justify-between space-x-3 group"
+                                >
+                                  <div className="space-y-1">
+                                    <p className="font-medium text-slate-200 text-xs leading-relaxed">{m.text}</p>
+                                    <p className="text-[10px] text-slate-500">Saved: {m.createdAt}</p>
+                                  </div>
+                                  <button
+                                    onClick={() => handleDeleteMemory(m.id)}
+                                    title="Delete Memory"
+                                    className="p-1 rounded text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* TAB 2: AUDIO DEVICES */}
+                    {settingsTab === 'audio' && (
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block font-semibold text-slate-300 mb-1">Microphone (Audio Input):</label>
+                          <select
+                            value={selectedMic}
+                            onChange={e => setSelectedMic(e.target.value)}
+                            className="w-full bg-[#161b22] border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-sky-500"
+                          >
+                            <option>Microphone (Realtek Audio #1)</option>
+                            <option>Headset Microphone (Sony WH-1000XM4 #2)</option>
+                            <option>System Default Input Device</option>
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block font-semibold text-slate-300 mb-1">Headphones / Speakers (Audio Output):</label>
+                          <select
+                            value={selectedOutput}
+                            onChange={e => setSelectedOutput(e.target.value)}
+                            className="w-full bg-[#161b22] border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-sky-500"
+                          >
+                            <option>Headphones (Sony WH-1000XM4 #3)</option>
+                            <option>Realtek High Definition Audio Speakers (#0)</option>
+                            <option>System Default Output Device</option>
+                          </select>
+                          <p className="text-[10px] text-slate-500 mt-1">Both Gemini Live voice and typed TTS answers will play through this selected device.</p>
+                        </div>
+
+                        <div className="space-y-2.5 pt-2 border-t border-slate-800">
+                          <label className="flex items-center space-x-2.5 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={speakTypedAnswers}
+                              onChange={e => setSpeakTypedAnswers(e.target.checked)}
+                              className="rounded border-slate-700 bg-slate-900 text-sky-600 focus:ring-0"
+                            />
+                            <span className="text-slate-200">Speak typed answers aloud automatically (Gemini TTS)</span>
+                          </label>
+
+                          <label className="flex items-center space-x-2.5 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={headphonesMode}
+                              onChange={e => setHeadphonesMode(e.target.checked)}
+                              className="rounded border-slate-700 bg-slate-900 text-sky-600 focus:ring-0"
+                            />
+                            <span className="text-slate-200">I'm using headphones (enables seamless barge-in without acoustic feedback)</span>
+                          </label>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* TAB 3: AI MODEL & KEY */}
+                    {settingsTab === 'ai' && (
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block font-semibold text-slate-300 mb-1">Gemini API Key (DPAPI Encrypted at rest):</label>
+                          <input
+                            type="password"
+                            value={apiKey}
+                            onChange={e => setApiKey(e.target.value)}
+                            className="w-full bg-[#161b22] border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-sky-500 font-mono"
+                          />
+                          <p className="text-[10px] text-slate-500 mt-1">Encrypted on Windows with CryptProtectData (DPAPI). Never stored in plaintext.</p>
+                        </div>
+
+                        <div>
+                          <label className="block font-semibold text-slate-300 mb-1">Active AI Model (Strictly Valid Free-Tier Models):</label>
+                          <select
+                            value={selectedModel}
+                            onChange={e => setSelectedModel(e.target.value)}
+                            className="w-full bg-[#161b22] border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-sky-500"
+                          >
+                            <option value="gemini-3.8-flash">gemini-3.8-flash (Flagship Default - Text, Vision & Tools)</option>
+                            <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (High-frequency & Lightweight fallback)</option>
+                          </select>
+                          <div className="mt-1.5 p-2 rounded-lg bg-amber-950/30 border border-amber-500/20 text-amber-300 text-[11px]">
+                            <strong>Notice:</strong> <code className="font-mono text-[10px]">gemini-2.5-flash</code> has been retired by Google AI Studio (returning 404 NOT_FOUND). Our code now strictly uses official supported models.
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block font-semibold text-slate-300 mb-1">AI Voice Persona:</label>
+                          <select
+                            value={selectedVoice}
+                            onChange={e => setSelectedVoice(e.target.value)}
+                            className="w-full bg-[#161b22] border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-sky-500"
+                          >
+                            <option>Puck (Conversational & Natural)</option>
+                            <option>Charon (Deep & Professional)</option>
+                            <option>Kore (Clear & Soothing)</option>
+                            <option>Fenrir (Energetic)</option>
+                            <option>Aoede (Melodic)</option>
+                          </select>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* TAB 4: HOTKEYS & STARTUP */}
+                    {settingsTab === 'hotkeys' && (
+                      <div className="space-y-4">
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label className="block font-semibold text-slate-300 mb-1">Toggle Assistant Dock:</label>
+                            <input
+                              type="text"
+                              readOnly
+                              value="Ctrl+Shift+Space"
+                              className="w-full bg-[#161b22] border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-sky-400 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-semibold text-slate-300 mb-1">Open Settings & Memory:</label>
+                            <input
+                              type="text"
+                              readOnly
+                              value="Ctrl+Shift+,"
+                              className="w-full bg-[#161b22] border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-emerald-400 font-mono"
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block font-semibold text-slate-300 mb-1">Push-to-Talk Voice Hotkey:</label>
+                          <input
+                            type="text"
+                            readOnly
+                            value="Ctrl+Shift+V"
+                            className="w-full bg-[#161b22] border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-cyan-400 font-mono"
+                          />
+                        </div>
+
+                        <div className="pt-2 border-t border-slate-800">
+                          <label className="flex items-center space-x-2.5 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={startWithWindows}
+                              onChange={e => setStartWithWindows(e.target.checked)}
+                              className="rounded border-slate-700 bg-slate-900 text-sky-600 focus:ring-0"
+                            />
+                            <span className="text-slate-200">Start with Windows (launch directly into Windows System Tray)</span>
+                          </label>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Modal Footer */}
+                  <div className="px-5 py-3 border-t border-slate-800 bg-[#161b22] flex items-center justify-between">
+                    {settingsSavedMessage ? (
+                      <span className="text-emerald-400 text-xs font-semibold">✓ Settings & Memories Saved!</span>
+                    ) : (
+                      <span className="text-slate-500 text-[11px]">Changes persist to %APPDATA%\GeminiOverlay</span>
+                    )}
+                    <button
+                      onClick={() => {
+                        setSettingsSavedMessage(true);
+                        setTimeout(() => {
+                          setSettingsSavedMessage(false);
+                          setSettingsOpen(false);
+                        }, 1200);
+                      }}
+                      className="px-4 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs transition-colors"
+                    >
+                      Save & Close
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Windows 11 Taskbar with System Tray */}
+            <div className="relative z-20 mt-auto bg-[#0d1117]/95 border-t border-slate-800 px-4 py-1.5 flex items-center justify-between rounded-xl backdrop-blur-xl shadow-2xl">
               <div className="flex items-center space-x-3">
-                <div className="w-6 h-6 rounded bg-blue-500 flex items-center justify-center text-white font-bold text-[10px]">
+                <div className="w-6 h-6 rounded bg-sky-500 flex items-center justify-center text-white font-bold text-[10px]">
                   ⊞
                 </div>
                 <div className="w-5 h-5 rounded bg-slate-800 flex items-center justify-center text-slate-400 text-[10px]">
@@ -791,60 +992,72 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Center App Icons */}
+              {/* Center App Badge */}
               <div className="flex items-center space-x-2">
-                <div className="px-2 py-1 rounded bg-slate-800/80 border border-slate-700/60 flex items-center space-x-2">
-                  <div className="w-3.5 h-3.5 rounded-full bg-purple-500 animate-pulse" />
-                  <span className="text-[11px] text-slate-300 font-mono">GeminiOverlay.exe [Active]</span>
+                <div className="px-2.5 py-1 rounded-lg bg-slate-800/80 border border-slate-700 flex items-center space-x-2">
+                  <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="text-[11px] text-slate-200 font-mono">GeminiOverlay.exe [Running in Tray]</span>
                 </div>
               </div>
 
-              {/* Windows System Tray */}
+              {/* System Tray Icons */}
               <div className="relative flex items-center space-x-3 text-xs text-slate-400">
                 <span>ENG</span>
 
-                {/* Gemini Tray Icon with Left/Right click support */}
+                {/* Gemini Tray Icon */}
                 <div className="relative">
                   <button
-                    onClick={() => setSimVisible(prev => !prev)}
+                    onClick={() => setDockVisible(prev => !prev)}
                     onContextMenu={e => {
                       e.preventDefault();
                       setTrayMenuOpen(prev => !prev);
                     }}
-                    title="GeminiOverlay Tray: Left-click toggles, Right-click opens menu"
-                    className="p-1 rounded hover:bg-slate-800 text-purple-400 hover:text-purple-300 transition-colors flex items-center justify-center"
+                    title="GeminiOverlay Tray: Left-click toggles dock, Right-click opens menu"
+                    className="p-1 rounded hover:bg-slate-800 text-sky-400 hover:text-sky-300 transition-colors flex items-center justify-center"
                   >
-                    <div className="w-4 h-4 rounded-full bg-gradient-to-tr from-purple-500 to-indigo-500 flex items-center justify-center shadow-sm">
+                    <div className="w-4 h-4 rounded-full bg-sky-500 flex items-center justify-center shadow-sm">
                       <Sparkles className="w-2.5 h-2.5 text-white" />
                     </div>
                   </button>
 
                   {/* Tray Context Menu */}
                   {trayMenuOpen && (
-                    <div className="absolute bottom-8 right-0 w-44 bg-slate-900/98 border border-slate-700 rounded-lg shadow-2xl p-1 text-xs text-slate-200 z-50">
+                    <div className="absolute bottom-8 right-0 w-48 bg-[#0d1117] border border-slate-700 rounded-lg shadow-2xl p-1 text-xs text-slate-200 z-50">
                       <button
-                        onClick={() => { setSimVisible(true); setSimTab('assistant'); setTrayMenuOpen(false); }}
-                        className="w-full text-left px-2.5 py-1.5 hover:bg-purple-600/30 rounded text-slate-200 hover:text-white"
+                        onClick={() => {
+                          setDockVisible(true);
+                          setTrayMenuOpen(false);
+                        }}
+                        className="w-full text-left px-2.5 py-1.5 hover:bg-sky-600/30 rounded text-slate-200 hover:text-white"
                       >
-                        Open Overlay
+                        Open Gemini Dock
                       </button>
                       <button
-                        onClick={() => { setSimVisible(true); setSimTab('settings'); setTrayMenuOpen(false); }}
-                        className="w-full text-left px-2.5 py-1.5 hover:bg-purple-600/30 rounded text-slate-200 hover:text-white"
+                        onClick={() => {
+                          setSettingsOpen(true);
+                          setTrayMenuOpen(false);
+                        }}
+                        className="w-full text-left px-2.5 py-1.5 hover:bg-sky-600/30 rounded text-slate-200 hover:text-white"
                       >
-                        Settings
+                        Settings & Memory
                       </button>
                       <div className="border-t border-slate-800 my-1" />
                       <button
-                        onClick={() => { setSimStartupEnabled(p => !p); setTrayMenuOpen(false); }}
-                        className="w-full text-left px-2.5 py-1.5 hover:bg-purple-600/30 rounded flex items-center justify-between"
+                        onClick={() => {
+                          setStartWithWindows(p => !p);
+                          setTrayMenuOpen(false);
+                        }}
+                        className="w-full text-left px-2.5 py-1.5 hover:bg-sky-600/30 rounded flex items-center justify-between"
                       >
                         <span>Start with Windows</span>
-                        {simStartupEnabled && <span className="text-purple-400">✓</span>}
+                        {startWithWindows && <span className="text-sky-400">✓</span>}
                       </button>
                       <div className="border-t border-slate-800 my-1" />
                       <button
-                        onClick={() => { setSimVisible(false); setTrayMenuOpen(false); }}
+                        onClick={() => {
+                          setDockVisible(false);
+                          setTrayMenuOpen(false);
+                        }}
                         className="w-full text-left px-2.5 py-1.5 hover:bg-red-500/20 text-red-400 rounded"
                       >
                         Exit GeminiOverlay
@@ -852,121 +1065,81 @@ export default function App() {
                     </div>
                   )}
                 </div>
-
-                <span>13:09</span>
               </div>
             </div>
           </div>
         )}
 
-        {/* TAB 2: PRODUCTION DELIVERABLES CODE VIEWER */}
+        {/* TAB 2: PRODUCTION FILES VIEWER (main.py, requirements.txt, build-release.yml) */}
         {activeTab === 'code' && (
-          <div className="flex-1 flex flex-col md:flex-row bg-slate-950 overflow-hidden">
-            {/* Left sidebar: File selector */}
-            <div className="w-full md:w-72 border-r border-slate-800 bg-slate-900/40 p-4 flex flex-col justify-between">
+          <div className="flex-1 flex flex-col md:flex-row bg-[#0b0f19] overflow-hidden">
+            {/* Sidebar File List */}
+            <div className="w-full md:w-64 border-r border-slate-800/80 bg-[#0d111a] p-4 flex flex-col justify-between">
               <div className="space-y-2">
-                <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider px-2 mb-2">
-                  Deliverable Files (3)
-                </div>
-
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 px-2 block">
+                  Production Deliverables
+                </span>
                 <button
                   onClick={() => setSelectedFile('main.py')}
-                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-medium transition-all ${
+                  className={`w-full flex items-center space-x-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-all ${
                     selectedFile === 'main.py'
-                      ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
-                      : 'text-slate-300 hover:bg-slate-800/60'
+                      ? 'bg-sky-600 text-white shadow-md shadow-sky-600/20'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
                   }`}
                 >
-                  <div className="flex items-center space-x-2.5">
-                    <FileCode className="w-4 h-4 text-purple-400" />
-                    <span>main.py</span>
-                  </div>
-                  <span className="text-[10px] opacity-75 font-mono">PyQt6 + GenAI</span>
+                  <FileCode className="w-4 h-4 text-sky-400" />
+                  <span>main.py</span>
                 </button>
-
                 <button
                   onClick={() => setSelectedFile('requirements.txt')}
-                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-medium transition-all ${
+                  className={`w-full flex items-center space-x-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-all ${
                     selectedFile === 'requirements.txt'
-                      ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
-                      : 'text-slate-300 hover:bg-slate-800/60'
+                      ? 'bg-sky-600 text-white shadow-md shadow-sky-600/20'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
                   }`}
                 >
-                  <div className="flex items-center space-x-2.5">
-                    <Layers className="w-4 h-4 text-cyan-400" />
-                    <span>requirements.txt</span>
-                  </div>
-                  <span className="text-[10px] opacity-75 font-mono">Python 3.12</span>
+                  <FileCode className="w-4 h-4 text-emerald-400" />
+                  <span>requirements.txt</span>
                 </button>
-
                 <button
                   onClick={() => setSelectedFile('build-release.yml')}
-                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-medium transition-all ${
+                  className={`w-full flex items-center space-x-2.5 px-3 py-2 rounded-xl text-xs font-medium transition-all ${
                     selectedFile === 'build-release.yml'
-                      ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
-                      : 'text-slate-300 hover:bg-slate-800/60'
+                      ? 'bg-sky-600 text-white shadow-md shadow-sky-600/20'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
                   }`}
                 >
-                  <div className="flex items-center space-x-2.5">
-                    <Github className="w-4 h-4 text-emerald-400" />
-                    <span>build-release.yml</span>
-                  </div>
-                  <span className="text-[10px] opacity-75 font-mono">CI/CD</span>
+                  <Github className="w-4 h-4 text-cyan-400" />
+                  <span>build-release.yml</span>
                 </button>
               </div>
 
-              {/* Windows Integration Checklist */}
-              <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2 mt-4">
-                <div className="text-[11px] font-bold text-slate-300 flex items-center space-x-1.5">
-                  <Shield className="w-3.5 h-3.5 text-purple-400" />
-                  <span>Production Safeguards</span>
-                </div>
-                <div className="space-y-1.5 text-[11px] text-slate-400">
-                  <div className="flex items-center space-x-1.5">
-                    <Check className="w-3 h-3 text-emerald-400" />
-                    <span>No hardcoded API keys</span>
-                  </div>
-                  <div className="flex items-center space-x-1.5">
-                    <Check className="w-3 h-3 text-emerald-400" />
-                    <span>Windows DPAPI at rest</span>
-                  </div>
-                  <div className="flex items-center space-x-1.5">
-                    <Check className="w-3 h-3 text-emerald-400" />
-                    <span>PortAudio 24kHz/16kHz stream</span>
-                  </div>
-                  <div className="flex items-center space-x-1.5">
-                    <Check className="w-3 h-3 text-emerald-400" />
-                    <span>QLockFile single-instance</span>
-                  </div>
-                </div>
+              <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 text-[11px] text-slate-400 space-y-1">
+                <div className="text-slate-300 font-semibold">Features Included:</div>
+                <div>• Bottom-Middle Mobile Dock</div>
+                <div>• Semi-Transparent Glassmorphism</div>
+                <div>• Persistent Memory Manager</div>
+                <div>• Headphones/Mic Routing</div>
+                <div>• DPAPI Security & Tray</div>
               </div>
             </div>
 
-            {/* Right main: Code Display */}
-            <div className="flex-1 flex flex-col bg-slate-950 overflow-hidden">
-              {/* Code viewer header */}
-              <div className="px-6 py-3 border-b border-slate-800 bg-slate-900/30 flex items-center justify-between">
-                <div className="flex items-center space-x-3">
-                  <span className="text-xs font-mono font-bold text-white">
+            {/* Code Content Viewer */}
+            <div className="flex-1 flex flex-col bg-[#080c14] overflow-hidden">
+              <div className="px-6 py-3 border-b border-slate-800/80 bg-[#0d111a] flex items-center justify-between">
+                <div className="flex items-center space-x-2 text-xs font-mono text-slate-300">
+                  <span className="text-slate-500">File:</span>
+                  <span className="text-sky-400 font-bold">
                     {selectedFile === 'build-release.yml' ? '.github/workflows/build-release.yml' : selectedFile}
                   </span>
-                  <span className="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
-                    Ready to copy or deploy
-                  </span>
                 </div>
-
                 <div className="flex items-center space-x-2">
                   <button
                     onClick={() => {
-                      const content =
-                        selectedFile === 'main.py'
-                          ? '// View main.py directly in workspace or copy below'
-                          : selectedFile === 'requirements.txt'
-                          ? REQUIREMENTS_TXT
-                          : GITHUB_WORKFLOW_YML;
+                      const content = selectedFile === 'requirements.txt' ? REQUIREMENTS_TXT : GITHUB_WORKFLOW_YML;
                       handleCopy(content, selectedFile);
                     }}
-                    className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium border border-slate-700 transition-colors"
+                    className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition-colors"
                   >
                     {copiedKey === selectedFile ? (
                       <>
@@ -980,19 +1153,12 @@ export default function App() {
                       </>
                     )}
                   </button>
-
                   <button
                     onClick={() => {
-                      const filename = selectedFile;
-                      const content =
-                        selectedFile === 'main.py'
-                          ? 'Refer to main.py created in root directory'
-                          : selectedFile === 'requirements.txt'
-                          ? REQUIREMENTS_TXT
-                          : GITHUB_WORKFLOW_YML;
-                      handleDownloadFile(filename, content);
+                      const content = selectedFile === 'requirements.txt' ? REQUIREMENTS_TXT : GITHUB_WORKFLOW_YML;
+                      handleDownloadFile(selectedFile, content);
                     }}
-                    className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-purple-600/30 hover:bg-purple-600/50 text-purple-200 text-xs font-medium border border-purple-500/40 transition-colors"
+                    className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold transition-colors"
                   >
                     <Download className="w-3.5 h-3.5" />
                     <span>Download</span>
@@ -1000,150 +1166,88 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Code Pre Block */}
-              <div className="flex-1 p-6 overflow-auto font-mono text-xs leading-relaxed text-slate-300">
-                <pre className="selection:bg-purple-600/40">
+              <div className="flex-1 overflow-auto p-6 font-mono text-xs text-slate-300 leading-relaxed scrollbar-thin scrollbar-thumb-slate-800">
+                <pre>
                   {selectedFile === 'requirements.txt' && REQUIREMENTS_TXT}
                   {selectedFile === 'build-release.yml' && GITHUB_WORKFLOW_YML}
-                  {selectedFile === 'main.py' &&
-                    `# main.py is fully created and available at /main.py in your repository.
-# Summary of components inside main.py:
-# 1. create_gemini_icon: Programmatically drawn glowing high-DPI icon (QPainter).
-# 2. ConfigManager: %APPDATA%\\GeminiOverlay\\config.json with Windows DPAPI encryption.
-# 3. StartupManager: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run support.
-# 4. force_activate_window: Win32 AttachThreadInput focus enforcement.
-# 5. GlobalHotkeyManager: pynput.keyboard.GlobalHotKeys with hotkey reload & Qt signals.
-# 6. GeminiTextWorker: client.models.generate_content_stream text & vision worker.
-# 7. TTSWorker: Gemini 2.5 TTS playback for typed answers with sounddevice.
-# 8. LiveAudioSessionWorker: Dedicated QThread asyncio loop with client.aio.live.connect,
-#    sounddevice 16kHz RawInputStream, 24kHz RawOutputStream, barge-in, transcription,
-#    and screen injection.
-# 9. GeminiOverlayWindow: Glassmorphism translucent frameless window with drag support,
-#    tab switching, auto-hide pin toggle, and Segoe UI styling.
-# 10. SystemTrayManager: QSystemTrayIcon with right-click menu and clean exit.
-# 11. QLockFile: Single-instance enforcement.
-
-# You can view the complete source directly in the project file tree (/main.py).`}
+                  {selectedFile === 'main.py' && `[main.py: 850+ lines of production PyQt6 Windows desktop code is saved to disk in /main.py]`}
                 </pre>
               </div>
             </div>
           </div>
         )}
 
-        {/* TAB 3: SETUP & DEVOPS GUIDE */}
+        {/* TAB 3: DEVOPS & ARCHITECTURE GUIDE */}
         {activeTab === 'docs' && (
-          <div className="flex-1 p-8 overflow-y-auto max-w-4xl mx-auto space-y-8">
-            <div>
-              <h2 className="text-2xl font-bold text-white mb-2">Windows Local Setup & Release Guide</h2>
-              <p className="text-sm text-slate-400">
-                How to run GeminiOverlay locally, test hotkeys and voice, and publish standalone signed releases via GitHub Actions.
-              </p>
-            </div>
+          <div className="flex-1 bg-[#0b0f19] p-8 overflow-y-auto">
+            <div className="max-w-4xl mx-auto space-y-6">
+              <div className="p-6 rounded-2xl bg-gradient-to-r from-sky-950/40 via-indigo-950/30 to-slate-900 border border-sky-500/20">
+                <h1 className="text-xl font-bold text-white mb-2">GeminiOverlay Architectural Architecture</h1>
+                <p className="text-sm text-slate-300 leading-relaxed">
+                  GeminiOverlay runs as a single-instance native Windows desktop application with a floating bottom-middle dock, persistent memory management, real-time two-way voice streaming via the Google GenAI SDK, and hardware-level audio device routing.
+                </p>
+              </div>
 
-            {/* Quickstart 3-Step */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
-                <div className="w-7 h-7 rounded-lg bg-purple-600/30 text-purple-300 flex items-center justify-center font-bold text-xs">
-                  1
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                  <div className="flex items-center space-x-2 text-sky-400 font-bold text-sm">
+                    <Monitor className="w-4 h-4" />
+                    <span>1. Bottom Dock & Glassmorphism</span>
+                  </div>
+                  <p className="text-slate-400 leading-relaxed">
+                    Rendered with a frameless translucent bottom sheet dock anchored 25px above the Windows taskbar. During active responses, the background shifts to a semi-transparent glassmorphism look (<code className="text-sky-300 font-mono">rgba(13, 17, 23, 0.72)</code>) so underlying screen text remains readable.
+                  </p>
                 </div>
-                <h4 className="font-semibold text-sm text-white">Create Virtual Environment</h4>
-                <p className="text-xs text-slate-400">Python 3.10-3.12 64-bit on Windows 10/11.</p>
-                <code className="block bg-slate-950 p-2 rounded text-[11px] font-mono text-purple-300">
-                  python -m venv venv<br />
-                  .\venv\Scripts\activate
-                </code>
-              </div>
 
-              <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
-                <div className="w-7 h-7 rounded-lg bg-cyan-600/30 text-cyan-300 flex items-center justify-center font-bold text-xs">
-                  2
+                <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                  <div className="flex items-center space-x-2 text-emerald-400 font-bold text-sm">
+                    <Brain className="w-4 h-4" />
+                    <span>2. Persistent Memory Manager</span>
+                  </div>
+                  <p className="text-slate-400 leading-relaxed">
+                    Stores custom rules and user preferences (e.g. "always address me as king") in <code className="text-emerald-300 font-mono">%APPDATA%\GeminiOverlay\memories.json</code>. Injected automatically into Gemini's system instruction on every prompt. Users can inspect, delete, and add memories inside Settings.
+                  </p>
                 </div>
-                <h4 className="font-semibold text-sm text-white">Install Dependencies</h4>
-                <p className="text-xs text-slate-400">Install PyQt6, google-genai, pywin32, etc.</p>
-                <code className="block bg-slate-950 p-2 rounded text-[11px] font-mono text-cyan-300">
-                  pip install -r requirements.txt
-                </code>
-              </div>
 
-              <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
-                <div className="w-7 h-7 rounded-lg bg-emerald-600/30 text-emerald-300 flex items-center justify-center font-bold text-xs">
-                  3
+                <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                  <div className="flex items-center space-x-2 text-purple-400 font-bold text-sm">
+                    <Headphones className="w-4 h-4" />
+                    <span>3. Audio Device Routing</span>
+                  </div>
+                  <p className="text-slate-400 leading-relaxed">
+                    Uses <code className="text-purple-300 font-mono">sounddevice.query_devices()</code> to discover microphones and headphones/speakers. Streams 16 kHz audio from the selected mic and outputs 24 kHz audio directly to the chosen headphones or speaker.
+                  </p>
                 </div>
-                <h4 className="font-semibold text-sm text-white">Launch Assistant</h4>
-                <p className="text-xs text-slate-400">Starts in tray, opens overlay window.</p>
-                <code className="block bg-slate-950 p-2 rounded text-[11px] font-mono text-emerald-300">
-                  python main.py
-                </code>
+
+                <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                  <div className="flex items-center space-x-2 text-cyan-400 font-bold text-sm">
+                    <Cpu className="w-4 h-4" />
+                    <span>4. Supported Free-Tier Models</span>
+                  </div>
+                  <p className="text-slate-400 leading-relaxed">
+                    Uses official active models <code className="text-cyan-300 font-mono">gemini-3.8-flash</code> (flagship default) and <code className="text-cyan-300 font-mono">gemini-3.5-flash-lite</code> (lightweight fallback). Deprecated models like <code className="text-red-400 font-mono">gemini-2.5-flash</code> that return 404 NOT_FOUND have been purged.
+                  </p>
+                </div>
               </div>
-            </div>
 
-            {/* Build Standalone EXE Locally */}
-            <div className="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-3">
-              <h3 className="font-bold text-base text-white flex items-center space-x-2">
-                <Terminal className="w-4 h-4 text-purple-400" />
-                <span>Local PyInstaller Packaging Command</span>
-              </h3>
-              <p className="text-xs text-slate-400">
-                Run this command in PowerShell to compile a single, zero-dependency <code>dist\GeminiOverlay.exe</code>:
-              </p>
-              <div className="relative">
-                <pre className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 text-xs text-purple-300 font-mono overflow-x-auto">
-{`pyinstaller \`
-  --noconsole \`
-  --onefile \`
-  --name GeminiOverlay \`
-  --clean \`
-  --hidden-import pynput.keyboard._win32 \`
-  --hidden-import pynput.mouse._win32 \`
-  --collect-submodules google.genai \`
-  --collect-submodules sounddevice \`
-  --collect-data sounddevice \`
-  --collect-binaries sounddevice \`
-  main.py`}
-                </pre>
+              {/* Windows Run Instructions */}
+              <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+                <h3 className="font-semibold text-sm text-white">Running Locally on Windows</h3>
+                <div className="space-y-2 text-xs font-mono">
+                  <div className="p-2.5 rounded bg-slate-950 border border-slate-800 text-slate-300">
+                    git clone &lt;repo-url&gt; && cd GeminiOverlay
+                  </div>
+                  <div className="p-2.5 rounded bg-slate-950 border border-slate-800 text-slate-300">
+                    python -m venv venv && .\venv\Scripts\activate
+                  </div>
+                  <div className="p-2.5 rounded bg-slate-950 border border-slate-800 text-slate-300">
+                    pip install -r requirements.txt
+                  </div>
+                  <div className="p-2.5 rounded bg-slate-950 border border-slate-800 text-sky-400">
+                    python main.py
+                  </div>
+                </div>
               </div>
-            </div>
-
-            {/* Triggering GitHub Release */}
-            <div className="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-3">
-              <h3 className="font-bold text-base text-white flex items-center space-x-2">
-                <Github className="w-4 h-4 text-emerald-400" />
-                <span>Triggering an Automated Release (Tags)</span>
-              </h3>
-              <p className="text-xs text-slate-400">
-                The GitHub Actions workflow (<code>.github/workflows/build-release.yml</code>) triggers automatically when pushing a semantic version tag:
-              </p>
-              <pre className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 text-xs text-emerald-300 font-mono">
-{`git add .
-git commit -m "feat: GeminiOverlay initial production release"
-git tag v1.0.0
-git push origin v1.0.0`}
-              </pre>
-              <p className="text-xs text-slate-400">
-                GitHub Actions will build on <code>windows-latest</code>, bundle PortAudio and Google GenAI submodules, generate SHA256 checksums, and publish <code>GeminiOverlay.exe</code> to the GitHub Releases page.
-              </p>
-            </div>
-
-            {/* Known Limitations */}
-            <div className="p-5 rounded-2xl bg-amber-950/20 border border-amber-500/30 space-y-3">
-              <h3 className="font-bold text-base text-amber-300 flex items-center space-x-2">
-                <AlertTriangle className="w-4 h-4 text-amber-400" />
-                <span>Known Limitations & Windows Architectural Context</span>
-              </h3>
-              <ul className="space-y-2 text-xs text-slate-300 list-disc list-inside">
-                <li>
-                  <strong>Windows Foreground Stealing:</strong> Windows limits background processes from calling <code>SetForegroundWindow</code>. The code implements the Win32 <code>AttachThreadInput</code> trick to reliably bring the overlay to the foreground when global hotkeys are pressed.
-                </li>
-                <li>
-                  <strong>DPAPI User Scope:</strong> API keys encrypted via Windows DPAPI (<code>win32crypt.CryptProtectData</code>) are tied to the current logged-in Windows user account. If the executable is run under a different user or service account, re-entering the key in Settings is required.
-                </li>
-                <li>
-                  <strong>Exclusive Audio Devices:</strong> If another application holds exclusive WASAPI control over your microphone, <code>sounddevice</code> may throw an audio device busy error. Keep default shared mode in Windows Sound Settings.
-                </li>
-                <li>
-                  <strong>High DPI Scaling:</strong> PyQt6 uses <code>PassThrough</code> high DPI rounding. On multi-monitor setups with mixed scaling (e.g. 150% laptop + 100% 4K monitor), dragging the window across screens is handled automatically.
-                </li>
-              </ul>
             </div>
           </div>
         )}

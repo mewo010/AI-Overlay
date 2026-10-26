@@ -1,7 +1,7 @@
 # GeminiOverlay - Python Dependencies
 # Compatible with Python 3.10, 3.11, and 3.12 on Windows 10/11 (64-bit)
 
-# Official Google GenAI SDK (supports Gemini 2.5/3.8 and Gemini Live API)
+# Official Google GenAI SDK (supports Gemini 3.8/3.5-flash and Gemini Live API)
 google-genai>=2.4.0
 
 # Desktop GUI Framework (Qt6)
