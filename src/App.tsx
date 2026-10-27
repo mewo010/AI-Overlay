@@ -34,6 +34,7 @@ import {
   Globe,
   ShieldCheck
 } from 'lucide-react';
+import MAIN_PY from '../main.py?raw';
 
 const REQUIREMENTS_TXT = `# Mark-LVI / GeminiOverlay - Python Dependencies
 # Compatible with Python 3.10, 3.11, and 3.12 on Windows 10/11 (64-bit)
@@ -961,7 +962,7 @@ export default function App() {
                 <div className="flex items-center space-x-2">
                   <button
                     onClick={() => {
-                      const content = selectedFile === 'requirements.txt' ? REQUIREMENTS_TXT : GITHUB_WORKFLOW_YML;
+                      const content = selectedFile === 'requirements.txt' ? REQUIREMENTS_TXT : selectedFile === 'build-release.yml' ? GITHUB_WORKFLOW_YML : MAIN_PY;
                       handleCopy(content, selectedFile);
                     }}
                     className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition-colors"
@@ -980,7 +981,7 @@ export default function App() {
                   </button>
                   <button
                     onClick={() => {
-                      const content = selectedFile === 'requirements.txt' ? REQUIREMENTS_TXT : GITHUB_WORKFLOW_YML;
+                      const content = selectedFile === 'requirements.txt' ? REQUIREMENTS_TXT : selectedFile === 'build-release.yml' ? GITHUB_WORKFLOW_YML : MAIN_PY;
                       handleDownloadFile(selectedFile, content);
                     }}
                     className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold transition-colors"
@@ -995,7 +996,7 @@ export default function App() {
                 <pre>
                   {selectedFile === 'requirements.txt' && REQUIREMENTS_TXT}
                   {selectedFile === 'build-release.yml' && GITHUB_WORKFLOW_YML}
-                  {selectedFile === 'main.py' && `[main.py: Production modular PyQt6 Mark-LVI source code saved in /main.py]`}
+                  {selectedFile === 'main.py' && MAIN_PY}
                 </pre>
               </div>
             </div>

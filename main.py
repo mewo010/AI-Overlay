@@ -340,7 +340,7 @@ class ConfigManager:
         "api_key_encrypted": "",
         "secondary_api_key_encrypted": "",   # For TTS or secondary provider
         "custom_base_url": "http://localhost:11434/v1",
-        "model": "gemini-3.5-flash-lite",     # Ultra-fast default
+        "model": "gemini-3.8-flash",          # Flagship default (Google AI Studio free tier)
         "live_model": "gemini-3.8-flash",
         "hotkey_toggle": "Ctrl+Shift+Space",
         "hotkey_settings": "Ctrl+Shift+,",
@@ -405,6 +405,13 @@ class ConfigManager:
             except Exception:
                 pass
 
+        # Sanitize deprecated models from previous runs (e.g. gemini-2.5-flash 404 error)
+        current_model = self.data.get("model", "")
+        if not current_model or current_model in ("gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash", "gemini-pro"):
+            self.data["model"] = "gemini-3.8-flash"
+        if self.data.get("live_model") in ("gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"):
+            self.data["live_model"] = "gemini-3.8-flash"
+
         # Validate geometry
         geom = self.data.get("window_geometry", {})
         if geom.get("height", 0) < 340:
@@ -462,9 +469,19 @@ class UniversalProviderEngine:
                 contents.append(image)
             contents.append(prompt)
 
-            models_ladder = [model, "gemini-3.5-flash-lite", "gemini-3.8-flash"]
+            # Sanitize target model against deprecated model aliases (e.g. gemini-2.5-flash)
+            clean_target = model if model not in ("gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash", "gemini-pro") else "gemini-3.8-flash"
+            models_ladder = [clean_target, "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+            
+            seen = set()
+            unique_ladder = []
+            for m in models_ladder:
+                if m and m not in seen:
+                    seen.add(m)
+                    unique_ladder.append(m)
+
             last_err = ""
-            for m in dict.fromkeys(models_ladder):
+            for m in unique_ladder:
                 try:
                     conf = types.GenerateContentConfig(
                         system_instruction=system_instruction,
@@ -479,9 +496,9 @@ class UniversalProviderEngine:
                                 on_chunk_cb(chunk.text)
                     return True, "".join(full_text)
                 except Exception as e:
-                    last_err = str(e)
+                    last_err = f"{m}: {e}"
                     continue
-            return False, f"Gemini Ladder Failed: {last_err}"
+            return False, f"Gemini API Error: {last_err}"
 
         # 2. OpenAI-Compatible Providers (Groq, DeepSeek, Ollama, LM Studio, etc.)
         base_urls = {
@@ -915,7 +932,7 @@ class OnboardingWizard(QDialog):
             providers = ["gemini", "groq", "deepseek", "ollama", "lmstudio", "openai", "openrouter"]
             self.cfg.data["llm_provider"] = providers[p_idx]
             if p_idx == 0:
-                self.cfg.data["model"] = "gemini-3.5-flash-lite"
+                self.cfg.data["model"] = "gemini-3.8-flash"
             elif p_idx == 1:
                 self.cfg.data["model"] = "llama-3.3-70b-versatile"
 
@@ -1463,8 +1480,58 @@ class GeminiOverlayWindow(QMainWindow):
 
 
 # ==============================================================================
-# 10. MAIN SYSTEM ENTRY POINT
+# 10. MAIN SYSTEM ENTRY POINT & KEY SEQUENCE TRANSLATION
 # ==============================================================================
+
+def qt_keysequence_to_pynput(seq_str: str) -> Optional[str]:
+    """
+    Converts a Qt key sequence string (e.g. 'Ctrl+Shift+Space' or 'Ctrl+Shift+T')
+    into pynput GlobalHotKeys format (e.g. '<ctrl>+<shift>+<space>').
+    """
+    if not seq_str or not str(seq_str).strip():
+        return None
+    raw = str(seq_str).strip()
+    parts = [p.strip() for p in raw.split("+") if p.strip()]
+    if not parts:
+        return None
+
+    key_map = {
+        "ctrl": "<ctrl>",
+        "control": "<ctrl>",
+        "shift": "<shift>",
+        "alt": "<alt>",
+        "meta": "<cmd>",
+        "win": "<cmd>",
+        "cmd": "<cmd>",
+        "space": "<space>",
+        "esc": "<esc>",
+        "escape": "<esc>",
+        "return": "<enter>",
+        "enter": "<enter>",
+        "tab": "<tab>",
+        "backspace": "<backspace>",
+        "up": "<up>",
+        "down": "<down>",
+        "left": "<left>",
+        "right": "<right>",
+        ",": ",",
+        ".": ".",
+        "/": "/",
+        ";": ";"
+    }
+
+    pynput_parts = []
+    for part in parts:
+        low = part.lower()
+        if low in key_map:
+            pynput_parts.append(key_map[low])
+        elif len(part) == 1:
+            pynput_parts.append(part.lower())
+        else:
+            pynput_parts.append(f"<{low}>")
+
+    return "+".join(pynput_parts) if pynput_parts else None
+
 
 def main():
     try:
@@ -1497,20 +1564,27 @@ def main():
 
     overlay = GeminiOverlayWindow(cfg, mem, None, discord)
 
-    # Hotkey registration
-    hotkeys = {
-        qt_keysequence_to_pynput(cfg.data.get("hotkey_toggle", "Ctrl+Shift+Space")): overlay.toggle_overlay,
-        qt_keysequence_to_pynput(cfg.data.get("hotkey_snip", "Ctrl+Shift+T")): overlay.trigger_region_snip,
-        qt_keysequence_to_pynput(cfg.data.get("hotkey_voice", "Ctrl+Shift+V")): overlay.toggle_voice_mode
-    }
-    valid_hotkeys = {k: v for k, v in hotkeys.items() if k}
+    # Thread-safe global hotkey registration dispatched via QTimer to the Qt main thread
+    valid_hotkeys = {}
+    hk_toggle = qt_keysequence_to_pynput(cfg.data.get("hotkey_toggle", "Ctrl+Shift+Space"))
+    if hk_toggle:
+        valid_hotkeys[hk_toggle] = lambda: QTimer.singleShot(0, overlay.toggle_overlay)
+
+    hk_snip = qt_keysequence_to_pynput(cfg.data.get("hotkey_snip", "Ctrl+Shift+T"))
+    if hk_snip:
+        valid_hotkeys[hk_snip] = lambda: QTimer.singleShot(0, overlay.trigger_region_snip)
+
+    hk_voice = qt_keysequence_to_pynput(cfg.data.get("hotkey_voice", "Ctrl+Shift+V"))
+    if hk_voice:
+        valid_hotkeys[hk_voice] = lambda: QTimer.singleShot(0, overlay.toggle_voice_mode)
+
     if valid_hotkeys:
         try:
             listener = pynput_kb.GlobalHotKeys(valid_hotkeys)
             listener.daemon = True
             listener.start()
         except Exception as e:
-            print(f"[Hotkeys] Error binding: {e}")
+            print(f"[Hotkeys] Error binding global hotkeys: {e}")
 
     # Tray Icon
     tray = QSystemTrayIcon(create_gemini_icon(32), overlay)
