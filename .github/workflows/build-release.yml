@@ -52,6 +52,8 @@ jobs:
             --clean `
             --hidden-import pynput.keyboard._win32 `
             --hidden-import pynput.mouse._win32 `
+            --hidden-import pypresence `
+            --hidden-import pyautogui `
             --collect-submodules google.genai `
             --collect-submodules sounddevice `
             --collect-data sounddevice `

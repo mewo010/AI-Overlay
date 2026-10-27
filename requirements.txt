@@ -28,3 +28,6 @@ pyinstaller>=6.5.0
 
 # Discord Rich Presence Overlay (mewo010 & light_134)
 pypresence>=4.3.0
+
+# OS Automation & Mouse Control (Mark-LVI Action Handlers)
+pyautogui>=0.9.54
